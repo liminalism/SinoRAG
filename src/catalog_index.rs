@@ -108,7 +108,15 @@ impl CorpusCatalogIndex {
     }
 
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(&std::fs::read(path)?)?)
+        let mut catalog: Self = bincode::deserialize(&std::fs::read(path)?)?;
+        // Older catalog builders split the JSON-encoded parquet value on
+        // commas, leaving entries such as `[\"Chan/Zen\"` and
+        // `\"Historical\"]`. Repair those records on load so existing packs do
+        // not need a full index rebuild just to return clean metadata.
+        for work in &mut catalog.works {
+            work.traditions = normalize_tradition_values(&work.traditions);
+        }
+        Ok(catalog)
     }
 
     pub fn info_payload(&self) -> serde_json::Value {
@@ -155,6 +163,42 @@ impl CorpusCatalogIndex {
         if let Some(p) = self.nodes.get_mut(parent as usize) {
             p.children.push(child);
         }
+    }
+}
+
+fn normalize_tradition_values(values: &[String]) -> Vec<String> {
+    let joined = values.join(",");
+    if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&joined) {
+        return parsed;
+    }
+    values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_tradition_values;
+
+    #[test]
+    fn repairs_legacy_json_fragments_without_changing_clean_values() {
+        assert_eq!(
+            normalize_tradition_values(&["[\"Historical\"]".to_string()]),
+            vec!["Historical"]
+        );
+        assert_eq!(
+            normalize_tradition_values(&[
+                "[\"Chan/Zen\"".to_string(),
+                "\"Historical\"]".to_string()
+            ]),
+            vec!["Chan/Zen", "Historical"]
+        );
+        assert_eq!(
+            normalize_tradition_values(&["Chan/Zen".to_string(), "Historical".to_string()]),
+            vec!["Chan/Zen", "Historical"]
+        );
     }
 }
 

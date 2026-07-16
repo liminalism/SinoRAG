@@ -2873,6 +2873,69 @@ impl ToolEngine {
         })
     }
 
+    /// Implement the work-metadata tool
+    pub async fn work_metadata_impl(
+        &self,
+        req: crate::tools::requests::WorkMetadataRequest,
+    ) -> Result<crate::tools::responses::WorkMetadataResponse> {
+        use std::collections::HashSet;
+
+        use crate::tools::responses::{WorkInfo, WorkMetadataResponse};
+
+        if req.work_ids.is_empty() {
+            return Err(ToolError::InvalidArgs(
+                "work-metadata requires at least one work_id".to_string(),
+            )
+            .into_anyhow());
+        }
+        if req.work_ids.len() > 100 {
+            return Err(ToolError::InvalidArgs(
+                "work-metadata accepts at most 100 work_ids per call".to_string(),
+            )
+            .into_anyhow());
+        }
+
+        let catalog = self.catalog().await?;
+        let mut seen = HashSet::new();
+        let mut works = Vec::new();
+        let mut missing_work_ids = Vec::new();
+
+        for raw_work_id in req.work_ids {
+            let work_id = raw_work_id.trim();
+            if work_id.is_empty() {
+                return Err(ToolError::InvalidArgs(
+                    "work-metadata work_ids must not contain empty strings".to_string(),
+                )
+                .into_anyhow());
+            }
+            if !seen.insert(work_id.to_string()) {
+                continue;
+            }
+
+            if let Some(work) = catalog.get_work(work_id) {
+                works.push(WorkInfo {
+                    work_id: work.work_id.clone(),
+                    main_title: work.main_title.clone(),
+                    author: Some(work.author.clone()),
+                    period: Some(work.period.clone()),
+                    canon: Some(work.canon.clone()),
+                    traditions: work.traditions.clone(),
+                    passage_count: work.passage_count as usize,
+                });
+            } else {
+                missing_work_ids.push(work_id.to_string());
+            }
+        }
+
+        Ok(WorkMetadataResponse {
+            schema: "sinorag-work-metadata-v1",
+            requested_count: seen.len(),
+            found_count: works.len(),
+            works,
+            missing_work_ids,
+        })
+    }
+
     /// Implement the works tool
     pub async fn works_impl(
         &self,

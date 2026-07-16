@@ -30,6 +30,9 @@ not a tool catalog.
   passage, especially reuse/retelling candidates.
 - **Scoped corpus reads**: `passage`, `source-read`, `expand-context-adaptive`,
   `heading-search`, `outline-search`.
+- **Known work IDs**: `work-metadata` fetches one or many exact IDs in a single
+  call. Batch IDs together instead of making parallel `works` calls; use
+  `works` for catalog listing or title/author filtering.
 - **Distinctive vocabulary / comparison**: `compare-usage`, `scope-profile`,
   `collocation-search`, `trace-term-usage`.
 - **Absence / clustering**: `absence-check`, `cluster-hits`.
@@ -52,7 +55,8 @@ not a tool catalog.
 
 **Principle**: exact evidence before discovery. Start with `search`,
 `evidence-search`, `works`, or `heading-search` when the user gives a phrase,
-person, title, work, or doctrine. Read the best hit with `passage` or
+person, title, work, or doctrine. If exact work IDs are already known, use one
+`work-metadata` call. Read the best hit with `passage` or
 `source-read`. Then, unless the user asked only for direct lookup, run
 `frontier` on the best seed passage to discover phrases and nearby source
 candidates the user did not know to search for. Use `cluster-hits` or

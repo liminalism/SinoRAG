@@ -311,6 +311,14 @@ pub struct WorksRequest {
     pub limit: usize,
 }
 
+/// Request for the work-metadata tool
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct WorkMetadataRequest {
+    /// One or more exact source_work_id values. Fetch multiple known IDs in
+    /// one call instead of issuing parallel `works` calls.
+    pub work_ids: Vec<String>,
+}
+
 /// Request for the catalog-index-info tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct CatalogIndexInfoRequest {}

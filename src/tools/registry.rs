@@ -490,12 +490,38 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
 
+        // Work metadata tool
+        ToolDef {
+            spec: ToolSpec {
+                name: "work-metadata",
+                audience: ToolAudience::DefaultAgent,
+                description: "Fetch catalog metadata for one or more exact work IDs in one call. Use required work_ids for known IDs; prefer this over parallel works calls.",
+                input_schema: schema_for::<WorkMetadataRequest>(),
+                output_schema: schema_for::<WorkMetadataResponse>(),
+                requires: vec!["catalog.index"],
+                safety: ToolSafety::ReadOnly,
+                examples: vec![
+                    ToolExample {
+                        title: "Fetch metadata for two known works",
+                        args: serde_json::json!({
+                            "work_ids": ["T48n2002A", "T48n2002B"]
+                        }),
+                    }
+                ],
+            },
+            call: |engine, args| Box::pin(async move {
+                let req: WorkMetadataRequest = serde_json::from_value(args)?;
+                let res = engine.work_metadata_impl(req).await?;
+                Ok(serde_json::to_value(res)?)
+            }),
+        },
+
         // Works tool
         ToolDef {
             spec: ToolSpec {
                 name: "works",
                 audience: ToolAudience::Specialist,
-                description: "List works in the catalog, optionally filtered by tradition/period/canon or normalized title/author substring — or look up a single work directly with work_id (title, author, period, canon, traditions) without reading passage text.",
+                description: "List or filter catalog works by tradition/period/canon or normalized title/author substring. A legacy single work_id lookup remains supported, but use work-metadata for known IDs and multi-ID retrieval.",
                 input_schema: schema_for::<WorksRequest>(),
                 output_schema: schema_for::<WorksResponse>(),
                 requires: vec!["catalog.index"],
