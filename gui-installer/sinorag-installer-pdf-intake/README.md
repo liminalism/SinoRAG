@@ -13,10 +13,30 @@ It is a variant of `../sinorag-installer-winsafe`. It uses the same `sinorag.7z`
 
 Ask questions with the **SinoRAG Documents** shortcut (`sinorag.exe agent`), which starts [OpenCode](https://opencode.ai) with the documents connected. If OpenCode is missing or will not start, the window stays open and says so instead of closing.
 
-Any other MCP client works too: add a local (stdio) server whose command is the full path of `sinorag.exe` in the install folder, with the single argument `mcp`. The intake log prints that command when a run finishes. For example, in a client that takes JSON:
+### AI apps (MCP)
+
+With **Connect AI apps** ticked, the intake adds a local MCP server named `sinorag-documents` to each of these that it finds for the current user. It is ticked on a first install, and on later runs if an app is already connected.
+
+| App | Config file it edits | Found when |
+|---|---|---|
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` | that folder exists |
+| Claude Desktop (Store/MSIX) | `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json` | the package exists |
+| Claude Code | `%USERPROFILE%\.claude.json` (user scope) | that file exists |
+| Codex | `%CODEX_HOME%\config.toml`, else `%USERPROFILE%\.codex\config.toml` | the folder exists |
+| Cursor | `%USERPROFILE%\.cursor\mcp.json` | the folder exists |
+| Windsurf | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` | the folder exists |
+| VS Code (and Insiders) | `%APPDATA%\Code\User\mcp.json` | the folder exists |
+| Gemini CLI | `%USERPROFILE%\.gemini\settings.json` | the folder exists |
+| LM Studio | `%USERPROFILE%\.lmstudio\mcp.json` | the folder exists |
+
+Only the `sinorag-documents` entry is written. Other settings are kept, although JSON keys may be reordered alphabetically. Before a file is first changed, a copy is kept beside it as `<name>.sinorag-backup`. A file the intake cannot parse (for example, VS Code's `mcp.json` with comments in it) is left untouched, and the log says so. The entry sets `SINORAG_TOOL_LOG` so that the tool log stays in the install folder rather than in the app's working folder. Restart an app to pick up the server. The uninstaller removes the entry from every app where it still points at this install.
+
+OpenCode is not in the list because the **SinoRAG Documents** shortcut configures it itself.
+
+Any other MCP client works too. Add a local (stdio) server whose command is the full path of `sinorag.exe` in the install folder, with the single argument `mcp`. For example, in a client that takes JSON:
 
 ```json
-{ "mcpServers": { "sinorag": { "command": "C:\\Users\\you\\AppData\\Local\\Programs\\SinoRAG-Documents\\sinorag.exe", "args": ["mcp"] } } }
+{ "mcpServers": { "sinorag-documents": { "command": "C:\\Users\\you\\AppData\\Local\\Programs\\SinoRAG-Documents\\sinorag.exe", "args": ["mcp"] } } }
 ```
 
 Three things to know:

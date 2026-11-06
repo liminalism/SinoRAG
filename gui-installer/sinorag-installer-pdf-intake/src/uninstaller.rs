@@ -127,6 +127,23 @@ fn main() {
         let _ = std::fs::remove_dir(folder);
     }
 
+    // AI apps the intake connected: drop the entries that start this install.
+    if let Some(loc) = sinorag_intake::mcp_clients::Locations::from_env() {
+        use sinorag_intake::mcp_clients::{detect_clients, unregister, Change, SERVER_NAME};
+        let exe = install_dir.join("sinorag.exe");
+        for outcome in unregister(&detect_clients(&loc), &exe) {
+            match outcome.result {
+                Ok(Change::Removed) => println!(
+                    "Removed MCP server \"{SERVER_NAME}\" from {} ({}).",
+                    outcome.client,
+                    outcome.config.display()
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("Warning: could not update {}: {e}", outcome.client),
+            }
+        }
+    }
+
     delete_uninstall_entry();
     println!("Removed uninstall registry entry.");
 
