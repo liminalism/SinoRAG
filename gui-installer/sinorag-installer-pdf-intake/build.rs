@@ -38,10 +38,59 @@ fn main() {
 
     let png_path = out_dir.join("sinorag-icon.png");
     let ico_path = out_dir.join("SinoRAG.ico");
-    write_icon_png(&png_path);
-    write_icon_ico(&png_path, &ico_path);
+    render_icon(256).save(&png_path).expect("write png icon");
+    write_icon_ico(&ico_path);
     println!("cargo:rustc-env=SINORAG_ICON_PNG={}", png_path.display());
     println!("cargo:rustc-env=SINORAG_ICON_ICO={}", ico_path.display());
+    embed_windows_resources(&ico_path, &version, &out_dir);
+}
+
+/// Give both exes the SinoRAG icon (Explorer, taskbar, the window caption via
+/// resource id 1) and version details for the file's Properties dialog.
+fn embed_windows_resources(ico_path: &Path, sinorag_version: &str, out_dir: &Path) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let pkg_version = env::var("CARGO_PKG_VERSION").expect("package version");
+    let mut parts = pkg_version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|p| p.parse::<u16>().ok());
+    let mut next = || parts.next().unwrap_or(0);
+    let numeric = format!("{},{},{},0", next(), next(), next());
+    let ico = ico_path.display().to_string().replace('\\', "\\\\");
+    let rc = format!(
+        r#"#pragma code_page(65001)
+1 ICON "{ico}"
+
+1 VERSIONINFO
+FILEVERSION {numeric}
+PRODUCTVERSION {numeric}
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "SinoRAG"
+      VALUE "FileDescription", "SinoRAG Document Intake"
+      VALUE "FileVersion", "{pkg_version}"
+      VALUE "ProductName", "SinoRAG Document Intake"
+      VALUE "ProductVersion", "{pkg_version} (SinoRAG {sinorag_version})"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#
+    );
+    let rc_path = out_dir.join("sinorag-intake.rc");
+    fs::write(&rc_path, rc).expect("write .rc");
+    embed_resource::compile(&rc_path, embed_resource::NONE)
+        .manifest_optional()
+        .expect("compiling the icon resource (needs rc.exe from the Windows SDK)");
 }
 
 /// The payload is built and packed separately from this crate, so nothing
@@ -170,11 +219,23 @@ fn read_package_version(path: &Path) -> String {
     panic!("no [package] version found in {}", path.display());
 }
 
-fn write_icon_png(path: &Path) {
-    let mut img = ImageBuffer::from_pixel(128, 128, Rgba([18, 50, 53, 255]));
-    for y in 0..128 {
-        for x in 0..128 {
-            let tint = ((x + y) / 14) as u8;
+/// The SinoRAG tile at `size` pixels: the "SINO / RAG" design of the CBETA
+/// installers on a rounded square. It is drawn on a 128-unit grid at four
+/// times the target size and scaled down, so edges are antialiased. At 32 px
+/// and below the two words would be a smudge, so the tile carries one large
+/// "S" instead (the way Fileglyph keeps small icons to a short label).
+fn render_icon(size: u32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let small = size <= 32;
+    let k = (size * 4).div_ceil(128).max(1);
+    let n = 128 * k;
+    let mut img = ImageBuffer::from_pixel(n, n, Rgba([0, 0, 0, 0]));
+    let radius = (if small { 20 } else { 16 }) * k;
+    for y in 0..n {
+        for x in 0..n {
+            if !inside_rounded(x, y, n, radius) {
+                continue;
+            }
+            let tint = ((x + y) / (14 * k)) as u8;
             img.put_pixel(
                 x,
                 y,
@@ -182,27 +243,50 @@ fn write_icon_png(path: &Path) {
             );
         }
     }
-    for y in 103..112 {
-        for x in 13..115 {
-            img.put_pixel(x, y, Rgba([154, 73, 55, 255]));
+    let fill = |img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, x0: u32, x1: u32, y0: u32, y1: u32, c: Rgba<u8>| {
+        for y in y0 * k..y1 * k {
+            for x in x0 * k..x1 * k {
+                img.put_pixel(x, y, c);
+            }
         }
+    };
+    let cinnabar = Rgba([154, 73, 55, 255]);
+    let gold = Rgba([197, 154, 61, 255]);
+    let paper = Rgba([247, 244, 234, 255]);
+    if small {
+        fill(&mut img, 16, 112, 100, 112, cinnabar);
+        fill(&mut img, 16, 80, 114, 120, gold);
+        draw_text(&mut img, 34 * k, 12 * k, "S", 12 * k, paper);
+    } else {
+        fill(&mut img, 13, 115, 103, 112, cinnabar);
+        fill(&mut img, 13, 83, 113, 118, gold);
+        draw_text(&mut img, 12 * k, 32 * k, "SINO", 4 * k, paper);
+        draw_text(&mut img, 22 * k, 73 * k, "RAG", 4 * k, paper);
     }
-    for y in 113..118 {
-        for x in 13..83 {
-            img.put_pixel(x, y, Rgba([197, 154, 61, 255]));
-        }
-    }
-    draw_text(&mut img, 12, 32, "SINO", 4, Rgba([247, 244, 234, 255]));
-    draw_text(&mut img, 22, 73, "RAG", 4, Rgba([247, 244, 234, 255]));
-    img.save(path).expect("write png icon");
+    image::imageops::resize(&img, size, size, image::imageops::FilterType::Lanczos3)
 }
 
-fn write_icon_ico(png_path: &Path, ico_path: &Path) {
-    let image = ico::IconImage::read_png(fs::File::open(png_path).expect("open png"))
-        .expect("read png for ico");
-    let dir_entry = ico::IconDirEntry::encode(&image).expect("encode ico entry");
+fn inside_rounded(x: u32, y: u32, n: u32, r: u32) -> bool {
+    let (x, y, n, r) = (x as i64, y as i64, n as i64, r as i64);
+    let cx = if x < r { r } else if x >= n - r { n - r - 1 } else { x };
+    let cy = if y < r { r } else if y >= n - r { n - r - 1 } else { y };
+    (x - cx).pow(2) + (y - cy).pow(2) <= r * r
+}
+
+/// Every size Windows asks for (list views, the taskbar at 100-200% scaling,
+/// Explorer's large views). Like Fileglyph: BMP entries up to 48 px, PNG above.
+fn write_icon_ico(ico_path: &Path) {
     let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
-    dir.add_entry(dir_entry);
+    for size in [16, 20, 24, 32, 40, 48, 64, 128, 256] {
+        let image = ico::IconImage::from_rgba_data(size, size, render_icon(size).into_raw());
+        let entry = if size <= 48 {
+            ico::IconDirEntry::encode_as_bmp(&image)
+        } else {
+            ico::IconDirEntry::encode_as_png(&image)
+        }
+        .expect("encode ico entry");
+        dir.add_entry(entry);
+    }
     dir.write(fs::File::create(ico_path).expect("create ico"))
         .expect("write ico");
 }

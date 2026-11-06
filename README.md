@@ -1,14 +1,44 @@
 # SinoRAG
 
-**SinoRAG** is a local-first research backend for Chinese Buddhist and classical Chinese corpora.
+**SinoRAG** is a local-first retrieval backend that lets an LLM agent search texts with tools instead of guessing from memory.
 
-It ingests TEI/XML, CEF, and HTML corpora into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, optional vector discovery, catalog browsing, and JSONL-based LLM-agent research workflows.
+It turns a collection of texts into a searchable passage database, then builds compact indexes for exact phrase search, TF-IDF similarity, optional vector discovery and catalog browsing. Agents use them over MCP or a JSON CLI. Everything runs on your machine, and nothing is uploaded.
 
-> Let an LLM agent research Chinese source texts with tools instead of guessing from memory.
+There are two ways to use it:
+
+- **Your own documents.** Point it at any number of PDFs, web pages or text files, and ask Claude, Codex, Cursor or another AI app questions about them, with answers cited by document and page. Scanned PDFs are OCR'd. On Windows the Document Intake installer does all of this without a command line; see [Your own documents](#your-own-documents-windows).
+- **Chinese Buddhist and classical Chinese research.** The original use case. It covers the full CBETA canon (TEI/XML), with term glosses, DDBC person and place authorities, and catalog, lineage and textual-reuse tools. See [Quick start](#quick-start).
+
+> Let an LLM agent research your sources with tools instead of guessing from memory.
+
+---
+
+## Your own documents (Windows)
+
+Download `SinoRAG-Document-Intake-<version>-windows-x64.zip` from [GitHub Releases](https://github.com/LegeApp/SinoRAG/releases), unzip it, and run `sinorag-intake.exe`:
+
+1. Add PDFs, HTML or `.txt` files, or whole folders, by dragging them onto the window or with **Add files…** / **Add folder…**.
+2. Choose the OCR language for scanned pages.
+3. Leave **Connect AI apps** ticked to add SinoRAG as an MCP server to the AI apps it finds: Claude Desktop, Claude Code, Codex, Cursor, Windsurf, VS Code, Gemini CLI and LM Studio.
+4. Press **Install and index**, then restart your AI app and ask it about your documents.
+
+To add more files later, open **Start Menu → SinoRAG → Add documents to SinoRAG**. Files already indexed are skipped. Uninstall SinoRAG from Settings → Apps.
+
+How it works:
+
+- PDFs go through the Lege PDF pipeline, which uses the text layer where it can be trusted and Windows OCR elsewhere.
+- Each document is split into passages of about 900 characters, which keep their page numbers.
+- English and other alphabetic text is searched by whole words, case-insensitively.
+- A search with no exact match still returns related passages, so the agent has somewhere to go next.
+- CJK text in the same collection is searched exactly as for CBETA.
+
+See [`gui-installer/sinorag-installer-pdf-intake/README.md`](gui-installer/sinorag-installer-pdf-intake/README.md) for the details, the install-folder layout and how to build it. On other platforms, convert your documents to CEF (see [Custom corpora](#custom-corpora-cef)) and use `sinorag ingest cef`.
 
 ---
 
 ## Quick start
+
+For the CBETA corpus:
 
 ```bash
 # 1. Download and initialize the CBETA corpus (one command)
@@ -49,7 +79,8 @@ After init, all tools work except `vector-neighbors` and `hybrid-discover`'s sem
 
 ## What it does
 
-- Ingests CBETA TEI/XML (GitHub xml-p5 and ISO xml-iso layouts), CEF JSON-lines, and Terebess HTML corpora
+- Ingests your own PDF, HTML and text files (Windows Document Intake), CBETA TEI/XML (GitHub xml-p5 and ISO xml-iso layouts), CEF JSON-lines, and Terebess HTML corpora
+- Searches alphabetic-script corpora by whole words (CEF `text_profile = "words"`), and CJK corpora by normalized characters
 - Builds a Parquet passage store partitioned by `source_corpus`
 - Annotates tool responses with Buddhist term glosses (`dict.parquet`) and DDBC person/place authority data (`persons.parquet`, `places.parquet`)
 - Provides exact phrase search over normalized Chinese text (`phrase.index`)
@@ -66,6 +97,7 @@ After init, all tools work except `vector-neighbors` and `hybrid-discover`'s sem
 
 | Source | Command | Input |
 |---|---|---|
+| Your own documents (Windows) | `sinorag-intake.exe` | PDF (with OCR), HTML, `.txt` files or folders |
 | CBETA (automatic, from pack) | `init` | no local files needed |
 | CBETA TEI/XML (GitHub) | `init --from-raw <PATH>` | CBETA root (containing `xml-p5/`) or `xml-p5/` directly |
 | CBETA ISO distribution | `init --from-raw <PATH>` | CBETA ISO root (containing `xml-iso/`) |
@@ -291,6 +323,8 @@ SinoRAG can export research bundles (`export-readzen`, `graph-build`, `report-bu
 
 ## Install
 
+For your own documents on Windows, use the Document Intake zip from [GitHub Releases](https://github.com/LegeApp/SinoRAG/releases) (see [above](#your-own-documents-windows)). To build from source:
+
 ```bash
 git clone https://github.com/LegeApp/SinoRAG
 cd SinoRAG
@@ -301,7 +335,7 @@ cargo install --path .
 
 ## Status
 
-Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`init`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, `run-tools`, `setup opencode`, `agent`, and `mcp`) are supported.
+Experimental but usable. Expect index schemas to change while the project stabilizes. The main user-facing commands (`init`, `status`, `indexes lexical`, `indexes semantic`, `tools-manifest`, `tool-call`, `run-tools`, `setup opencode`, `agent`, and `mcp`) are supported. The Windows Document Intake installer is released as a zip on GitHub Releases. It cannot remove individual documents yet.
 
 SinoRAG supports both JSON CLI and MCP against the same tool registry: use JSON CLI for reproducible command-line workflows, and use MCP for live agent sessions. `sinorag agent` is the maintained opencode wrapper around `sinorag mcp`.
 

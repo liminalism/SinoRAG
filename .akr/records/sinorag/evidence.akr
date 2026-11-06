@@ -26,3 +26,26 @@ record sinorag.evidence.english-intake-end-to-end/1 : evidence {
         """
     author "dk"
 }
+
+record sinorag.evidence.mcp-surface-refinement-run/1 : evidence {
+    title "MCP surface and intake refinement: tests, two-client sweep and GUI install/uninstall on the uncommitted tree"
+    state verified
+    scope [
+        path "gui-installer/sinorag-installer-pdf-intake/**",
+        path "src/agent/**",
+        path "src/mcp/**",
+        path "src/tools/**",
+        path "tests/mcp_stdio.rs"
+    ]
+    result pass
+    method command
+    observed_at git:ffd166fa97b73eeb40f517036f18cc95af7d96b5
+    command """
+        cargo test (repo root); cargo test --lib (gui-installer/sinorag-installer-pdf-intake); make-payload.ps1; cargo build --release (intake); sinorag-intake.exe driven by UI Automation into a scratch folder; stdio MCP sweep with a Python driver and with @modelcontextprotocol/sdk 1.32.2; sinorag-intake-uninstaller.exe
+        """
+    summary """
+        Observed 2026-11-06 on the working tree over ffd166f (changes uncommitted). Root `cargo test`: 95 unit tests and 2 tests in tests/mcp_stdio.rs passed; one earlier full run failed vector_index::tests::build_open_and_search_roundtrip, which passed on 6 reruns and in the next full run, in a module this work did not touch. Intake `cargo test --lib`: 24 passed. Release sinorag-intake.exe installed into a scratch folder with OpenCode and both shortcut boxes unchecked: 6 documents indexed (921 passages, including a 434-page PDF); an empty text file, a PDF named .txt, a ZIP-signature file named .html and 20 KB of an executable named .txt were each reported as failed with the reason and not stored. A second run of a rebuilt installer over an install of the same version logged `Replacing SinoRAG 0.5.5 with this installer's build of it`, added one new document and skipped one already indexed. Against the installed release sinorag.exe: the TypeScript SDK client listed 27 tools (tools/list 38,301 characters, no outputSchema, no write tools) and delivered 10 of 10 calls; a 71-call sweep returned 55 successes and 16 error results, each an intended error case (invalid_args, passage_not_found, readonly_violation, unknown_tool, missing_vector_index), with no internal_error, no non-JSON line on stdout and no server exit. `sinorag agent` with OpenCode missing stayed open when started in its own console and exited at once in a shared one; a dry run kept a `model` key and a second MCP entry in an existing opencode.json. The uninstaller listed two entries it had not created before asking, and after `y` the folder and the HKCU uninstall key were gone. During development a recursion in the related-passages fallback overflowed the stack on a three-word phrase; after the fix the same call and the sweep completed.
+        """
+    derived_from [ @sinorag.mcp.client-facing-surface ]
+    author "dk"
+}

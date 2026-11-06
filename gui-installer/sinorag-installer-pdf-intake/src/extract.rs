@@ -82,13 +82,63 @@ pub fn extract(
         DocKind::Pdf => extract_pdf(path, opts, progress),
         DocKind::Html => {
             let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            refuse_binary(&bytes)?;
             Ok(extract_html_bytes(&bytes, &file_stem(path)))
         }
         DocKind::Text => {
             let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            refuse_binary(&bytes)?;
             Ok(extract_text_bytes(&bytes, &file_stem(path)))
         }
     }
+}
+
+/// A file named `.txt` or `.html` that is something else. Decoded as text it
+/// would still produce "passages": thousands of them, all noise, which then
+/// rank in every search. So say what the file is and index nothing.
+fn refuse_binary(bytes: &[u8]) -> Result<()> {
+    match binary_kind(bytes) {
+        None => Ok(()),
+        Some("a PDF") => Err(anyhow!(
+            "this is a PDF with a text file's name. Rename it to end in .pdf and add it again."
+        )),
+        Some(what) => Err(anyhow!(
+            "this is {what}, not text. Save it as PDF or plain text from the program that made it, \
+             and add that file instead."
+        )),
+    }
+}
+
+/// What `bytes` are when they are not text: a known file signature, or
+/// content too full of control characters to be writing in any encoding.
+pub fn binary_kind(bytes: &[u8]) -> Option<&'static str> {
+    const SIGNATURES: &[(&[u8], &str)] = &[
+        (b"%PDF-", "a PDF"),
+        (b"PK\x03\x04", "a Word, Excel, EPUB or ZIP file"),
+        (b"\xD0\xCF\x11\xE0", "an older Word or Excel file"),
+        (b"{\\rtf", "a Rich Text (RTF) document"),
+        (b"\x89PNG", "an image"),
+        (b"\xFF\xD8\xFF", "an image"),
+        (b"GIF8", "an image"),
+        (b"7z\xBC\xAF", "a compressed archive"),
+        (b"\x1F\x8B", "a compressed archive"),
+        (b"Rar!", "a compressed archive"),
+    ];
+    if let Some((_, what)) = SIGNATURES.iter().find(|(magic, _)| bytes.starts_with(magic)) {
+        return Some(what);
+    }
+    // Judge the text as it will be indexed, so UTF-16 (half NUL bytes) and
+    // ISO-2022-JP (escape sequences) are seen as the text they are.
+    let sample = &bytes[..bytes.len().min(64 * 1024)];
+    let (text, _) = decode_text(sample, None);
+    let total = text.chars().count();
+    let control = text
+        .chars()
+        .filter(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\u{000C}'))
+        .count();
+    // Text has none, bar a stray one; compressed or compiled data has about
+    // one in ten.
+    (control >= 8 && control * 50 > total).then_some("a binary file")
 }
 
 fn file_stem(path: &Path) -> String {
@@ -687,6 +737,39 @@ mod tests {
         assert!(!body.contains("color"));
         assert!(!body.contains("var x"));
         assert!(!body.contains("hidden"));
+    }
+
+    #[test]
+    fn binary_files_with_a_text_name_are_refused() {
+        assert_eq!(binary_kind(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n1 0 obj"), Some("a PDF"));
+        assert_eq!(binary_kind(b"PK\x03\x04\x14\x00\x06\x00"), Some("a Word, Excel, EPUB or ZIP file"));
+        assert_eq!(binary_kind(b"{\\rtf1\\ansi Hello"), Some("a Rich Text (RTF) document"));
+        // No signature, but nothing a person wrote either.
+        let noise: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        assert_eq!(binary_kind(&noise), Some("a binary file"));
+
+        // Text in every encoding intake reads is let through.
+        assert_eq!(binary_kind(b""), None);
+        assert_eq!(binary_kind("Plain text.\r\n\tIndented, with a form feed\u{000C}and 中文.".as_bytes()), None);
+        let utf16: Vec<u8> = "Sixteen-bit text without a byte-order mark.\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(binary_kind(&utf16), None);
+        let (big5, _, _) = encoding_rs::BIG5.encode("如是我聞。一時佛在舍衛國祇樹給孤獨園。\n");
+        assert_eq!(binary_kind(&big5), None);
+        let (jis, _, _) = encoding_rs::ISO_2022_JP.encode("日本語のテキストです。\n");
+        assert_eq!(binary_kind(&jis), None);
+        // One stray control character does not condemn a document.
+        assert_eq!(binary_kind(b"A page\x01 with a stray byte, and plenty of ordinary text after it."), None);
+
+        let dir = std::env::temp_dir().join(format!("sinorag-intake-binary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.txt");
+        std::fs::write(&path, b"%PDF-1.7\n").unwrap();
+        let err = extract(&path, DocKind::Text, &ExtractOptions::default(), &mut |_, _| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("Rename it to end in .pdf"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

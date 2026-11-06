@@ -102,7 +102,8 @@ and stop — do not silently switch lenses.
   inference, describe zero hits as absence in the loaded corpus rather than
   proof of nonexistence, and do not turn the earliest loaded attestation into
   an unsupported claim about historical origin.
-- Tool errors with `code = missing_artifact` mean the relevant index has
-  not been built; surface this to the user rather than guessing.
+- Tool errors whose `code` starts with `missing_` mean the corpus or one of
+  its indexes has not been built; tell the user what `suggested_command`
+  says rather than guessing or retrying.
 - Prefer JSON-ready output when the next consumer is another tool; prefer
   prose when the next consumer is the user.

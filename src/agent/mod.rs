@@ -33,6 +33,73 @@ const SENTINEL_BEGIN: &str =
 const SENTINEL_END: &str = "<!-- END sinorag-managed -->";
 
 pub fn run(args: AgentArgs) -> Result<()> {
+    let outcome = launch(args);
+    if let Err(err) = &outcome {
+        hold_console_open(err);
+    }
+    outcome
+}
+
+/// `sinorag agent` is what a Start Menu or desktop shortcut runs. Started
+/// that way it owns its console window, which closes the moment the process
+/// exits: a failure (OpenCode not installed, say) would flash by unread. So
+/// when nothing else shares the console, say what happened and wait.
+fn hold_console_open(err: &anyhow::Error) {
+    if !console_is_ours_alone() {
+        return;
+    }
+    eprintln!();
+    if err.downcast_ref::<OpencodeExited>().is_some() {
+        // It ran; whatever it printed on the way out is still on screen.
+        eprintln!("{err}.");
+    } else {
+        eprintln!("SinoRAG could not start the chat session:");
+        eprintln!("  {err:#}");
+        eprintln!();
+        eprintln!("This shortcut opens OpenCode (https://opencode.ai), the program you talk to.");
+        eprintln!("If it is not installed, install it and open this shortcut again.");
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        eprintln!();
+        eprintln!("Any other MCP client can use the documents as well. Give it this command:");
+        eprintln!("  \"{}\" mcp", strip_extended_prefix(exe).display());
+    }
+    eprintln!();
+    eprint!("Press Enter to close this window. ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
+
+/// OpenCode started and then ended in failure: not a problem with finding
+/// or launching it.
+#[derive(Debug)]
+struct OpencodeExited(std::process::ExitStatus);
+
+impl std::fmt::Display for OpencodeExited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "opencode exited with status {}", self.0)
+    }
+}
+
+impl std::error::Error for OpencodeExited {}
+
+#[cfg(windows)]
+fn console_is_ours_alone() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleProcessList(process_list: *mut u32, process_count: u32) -> u32;
+    }
+    let mut attached = [0u32; 2];
+    // SAFETY: the buffer holds the two ids the count allows.
+    unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) == 1 }
+}
+
+#[cfg(not(windows))]
+fn console_is_ours_alone() -> bool {
+    false
+}
+
+fn launch(args: AgentArgs) -> Result<()> {
     // `main.rs` already chdir's into the exe's directory at startup so the
     // binary works the same regardless of where it was invoked. That's where
     // the bundled `data/` pack lives, so it's also the right workdir for
@@ -74,7 +141,7 @@ pub fn run(args: AgentArgs) -> Result<()> {
         .status()
         .with_context(|| format!("failed to spawn opencode at {}", opencode.display()))?;
     if !status.success() {
-        return Err(anyhow!("opencode exited with status {status}"));
+        return Err(OpencodeExited(status).into());
     }
     Ok(())
 }
@@ -154,9 +221,53 @@ fn write_opencode_config(
     });
 
     let path = dir.join("opencode.json");
-    let text = serde_json::to_string_pretty(&config)?;
+    // The file is OpenCode's project configuration, and the user may have
+    // put a model or provider in it. Only the `sinorag` MCP entry is ours:
+    // set that and keep the rest.
+    let existing = std::fs::read_to_string(&path).ok();
+    let merged = merge_opencode_config(existing.as_deref(), config);
+    let text = serde_json::to_string_pretty(&merged)?;
+    if existing.as_deref() == Some(text.as_str()) {
+        return Ok(());
+    }
+    if let Some(previous) = &existing {
+        if serde_json::from_str::<serde_json::Value>(previous).is_err() {
+            // Not plain JSON (comments, a half-finished edit): it cannot be
+            // merged, so keep the user's copy beside the replacement.
+            let backup = dir.join("opencode.json.bak");
+            std::fs::write(&backup, previous)
+                .with_context(|| format!("failed to write {}", backup.display()))?;
+            eprintln!(
+                "agent: {} was not plain JSON; it is kept as {}",
+                path.display(),
+                backup.display()
+            );
+        }
+    }
     std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+/// `ours` laid over the configuration already on disk: the `sinorag` MCP
+/// server is replaced, everything else the file holds is kept.
+fn merge_opencode_config(existing: Option<&str>, ours: serde_json::Value) -> serde_json::Value {
+    let Some(serde_json::Value::Object(mut root)) =
+        existing.and_then(|text| serde_json::from_str(text).ok())
+    else {
+        return ours;
+    };
+    root.entry("$schema")
+        .or_insert_with(|| ours["$schema"].clone());
+    let mcp = root
+        .entry("mcp")
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    match mcp {
+        serde_json::Value::Object(servers) => {
+            servers.insert("sinorag".to_string(), ours["mcp"]["sinorag"].clone());
+        }
+        other => *other = ours["mcp"].clone(),
+    }
+    serde_json::Value::Object(root)
 }
 
 /// Refresh the sinorag-managed slice of `AGENTS.md` without clobbering any
@@ -165,19 +276,17 @@ fn write_opencode_config(
 fn write_agents_md(workdir: &std::path::Path) -> Result<()> {
     let path = workdir.join("AGENTS.md");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    // English/alphabetic-script corpora (document intake) get a short extra
-    // section on how word-aware search behaves; CBETA installs do not.
+    // A collection of the user's own documents (document intake) gets the
+    // documents doctrine; a data root with CBETA in it keeps the research
+    // doctrine, with a section on word-aware search when it also holds
+    // English text. The MCP server makes the same choice for its
+    // instructions.
     let parquet = workdir.join("data").join("passages.parquet");
-    let body = if crate::normalize::data_root_has_word_corpus(&parquet) {
-        format!(
-            "{}\n\n{}",
-            AGENTS_MD_MANAGED_BODY.trim_end(),
-            crate::mcp::server::WORD_CORPUS_INSTRUCTIONS.trim_end()
-        )
-    } else {
-        AGENTS_MD_MANAGED_BODY.to_string()
-    };
+    let body = crate::mcp::server::doctrine_for(&parquet, AGENTS_MD_MANAGED_BODY);
     let new_contents = update_managed_block_with(&existing, &body);
+    if new_contents == existing {
+        return Ok(());
+    }
     std::fs::write(&path, new_contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
@@ -220,6 +329,30 @@ fn update_managed_block_with(existing: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_config_keeps_what_the_user_added() {
+        let ours = json!({
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": { "sinorag": { "type": "local", "command": ["new.exe", "mcp"], "enabled": true } }
+        });
+        let existing = r#"{
+            "model": "anthropic/claude-sonnet-4-5",
+            "mcp": {
+                "sinorag": { "type": "local", "command": ["old.exe", "mcp"], "enabled": true },
+                "other": { "type": "local", "command": ["other"] }
+            }
+        }"#;
+        let merged = merge_opencode_config(Some(existing), ours.clone());
+        assert_eq!(merged["model"], "anthropic/claude-sonnet-4-5");
+        assert_eq!(merged["mcp"]["other"]["command"][0], "other");
+        assert_eq!(merged["mcp"]["sinorag"]["command"][0], "new.exe");
+        assert_eq!(merged["$schema"], "https://opencode.ai/config.json");
+
+        // Nothing there, or nothing usable: ours as it is.
+        assert_eq!(merge_opencode_config(None, ours.clone()), ours);
+        assert_eq!(merge_opencode_config(Some("// notes\n{"), ours.clone()), ours);
+    }
 
     #[test]
     fn writes_block_into_empty_file() {

@@ -344,6 +344,33 @@ notes = "PDF text via the Lege PDF pipeline (native text layer, OCR fallback)."
     }
 }
 
+/// Which build of sinorag.exe an install holds: the SHA-256 of the payload
+/// archive it was unpacked from. The version number cannot tell two builds
+/// of one version apart, so an installer rebuilt with a fix would otherwise
+/// find "0.5.5 is already installed" and leave the old program in place.
+pub fn payload_id(payload: &[u8]) -> String {
+    hex::encode(Sha256::digest(payload))
+}
+
+fn payload_marker(install_root: &Path) -> PathBuf {
+    install_root.join("intake").join("payload.sha256")
+}
+
+/// The payload the install was last given, if it recorded one.
+pub fn installed_payload_id(install_root: &Path) -> Option<String> {
+    fs::read_to_string(payload_marker(install_root))
+        .ok()
+        .map(|id| id.trim().to_string())
+}
+
+pub fn record_payload_id(install_root: &Path, id: &str) -> Result<()> {
+    let marker = payload_marker(install_root);
+    if let Some(dir) = marker.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(&marker, id).with_context(|| format!("writing {}", marker.display()))
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -631,6 +658,24 @@ mod tests {
         let chunks = chunk_text(&text, 900, 1400);
         assert!(chunks.iter().all(|c| c.chars().count() <= 1400));
         assert_eq!(chunks.iter().map(|c| c.chars().count()).sum::<usize>(), 5000);
+    }
+
+    #[test]
+    fn an_install_remembers_which_payload_it_holds() {
+        let root = std::env::temp_dir().join(format!("sinorag-intake-payload-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // A folder from before the marker existed, or a fresh one.
+        assert_eq!(installed_payload_id(&root), None);
+
+        let first = payload_id(b"build one");
+        let second = payload_id(b"build two");
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, second);
+        record_payload_id(&root, &first).unwrap();
+        assert_eq!(installed_payload_id(&root).as_deref(), Some(first.as_str()));
+        record_payload_id(&root, &second).unwrap();
+        assert_eq!(installed_payload_id(&root).as_deref(), Some(second.as_str()));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

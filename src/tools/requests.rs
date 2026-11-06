@@ -26,32 +26,49 @@ impl Default for Verbosity {
 /// Request for the search tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct SearchRequest {
+    /// The exact text to find. Chinese, Japanese and Korean match character
+    /// for character. English and other alphabetic text matches whole words,
+    /// ignoring case and punctuation, with no stemming: keep it to a few
+    /// distinctive words, not a question or a full sentence.
     pub phrase: String,
 
+    /// Most hits to return.
     #[serde(default = "default_limit")]
     pub limit: usize,
 
+    /// `hits` (default) returns matching passages. `clusters` adds hit
+    /// counts per work or division, `trace` adds usage by period, `all` adds
+    /// both.
     #[serde(default = "default_search_mode")]
     pub mode: String,
 
+    /// `exact` (default) searches the phrase as given. `expanded` and
+    /// `reuse` also search its CJK variant spellings.
     #[serde(default = "default_search_depth")]
     pub depth: String,
 
+    /// What `clusters` groups by: `work` (default) or `division`.
     #[serde(default = "default_cluster_by")]
     pub group_by: String,
 
+    /// Also search CJK variant spellings of the phrase.
     #[serde(default)]
     pub include_variants: bool,
 
+    /// Most clusters or trace groups to return.
     #[serde(default = "default_limit_per_group")]
     pub limit_per_group: usize,
 
+    /// true cuts each quote to 120 characters. Use it to survey many hits,
+    /// then read the ones that matter with `passage` or `source-read`.
     #[serde(default)]
     pub brief: bool,
 
     #[serde(default)]
     pub canon: Option<String>,
 
+    /// Search inside one work only: a `work_id` from `works`, or the
+    /// `source_work_id` of an earlier hit.
     #[serde(default)]
     pub source_work_id: Option<String>,
 
@@ -134,6 +151,8 @@ fn default_search_depth() -> String {
 /// Request for the passage tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PassageRequest {
+    /// The complete passage_id of a hit, `#anchor` included, exactly as a
+    /// search tool returned it. Not a work id.
     #[serde(alias = "passage_id")]
     pub id: String,
 }

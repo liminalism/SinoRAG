@@ -858,18 +858,44 @@ fn count_unique_ngrams_with_terms(
     if gram_len == 0 {
         return 0;
     }
-    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if chars.len() < gram_len {
-        return 0;
-    }
-
     let mut seen = rustc_hash::FxHashSet::default();
-    for window in chars.windows(gram_len) {
-        let term: String = window.iter().collect();
+    let mut add = |term: String| {
         let hash = xxhash_rust::xxh3::xxh3_64(term.as_bytes());
         if seen.insert(hash) {
             *counts.entry(hash).or_insert(0) += 1;
             terms.entry(hash).or_insert(term);
+        }
+    };
+
+    if !crate::normalize::has_word_layout(text) {
+        let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+        for window in chars.windows(gram_len) {
+            add(window.iter().collect());
+        }
+        return seen.len() as u32;
+    }
+
+    // Word-layout text (English and other alphabetic scripts): a term is
+    // `gram_len` consecutive content words. Counting characters here would
+    // report single letters as the vocabulary. CJK runs inside such text are
+    // still counted by character.
+    let mut run: Vec<&str> = Vec::new();
+    for token in text.split(' ').filter(|t| !t.is_empty()) {
+        if token.chars().any(crate::normalize::is_dense_char) {
+            run.clear();
+            let chars: Vec<char> = token.chars().collect();
+            for window in chars.windows(gram_len) {
+                add(window.iter().collect());
+            }
+        } else if crate::tfidf::ngram::keep_word(token) {
+            run.push(token);
+            if run.len() >= gram_len {
+                add(run[run.len() - gram_len..].join(" "));
+            }
+        } else {
+            // A stopword or a stray letter ends the run, as in the TF-IDF
+            // word features: "pump of coolant" is not the term "pump coolant".
+            run.clear();
         }
     }
     seen.len() as u32
@@ -888,6 +914,43 @@ mod tests {
             zh_quote: String::new(),
             score: None,
         }
+    }
+
+    fn terms(text: &str, gram_len: usize) -> Vec<String> {
+        let mut counts = FxHashMap::default();
+        let mut display = FxHashMap::default();
+        count_unique_ngrams_with_terms(text, gram_len, &mut counts, &mut display);
+        let mut terms: Vec<String> = display.into_values().collect();
+        terms.sort();
+        terms
+    }
+
+    #[test]
+    fn terms_of_english_text_are_words_not_letters() {
+        let text = crate::normalize::normalize_words("The coolant pump of the Coolant Pump leaks.");
+        assert_eq!(terms(&text, 1), vec!["coolant", "leaks", "pump"]);
+        // A stopword ends a run: "pump ... coolant" across "of the" is no term.
+        assert_eq!(terms(&text, 2), vec!["coolant pump", "pump leaks"]);
+    }
+
+    #[test]
+    fn terms_of_cjk_text_are_still_characters() {
+        assert_eq!(terms("如是我聞", 2), vec!["如是", "我聞", "是我"]);
+        // CJK inside word-layout text keeps the character treatment.
+        let mixed = crate::normalize::normalize_words("pump 如是我 valve");
+        assert_eq!(terms(&mixed, 2), vec!["如是", "是我"]);
+    }
+
+    #[test]
+    fn overlap_of_english_text_is_counted_in_words() {
+        let quote = crate::normalize::normalize_words("Use only approved words");
+        let related = crate::normalize::normalize_words("Rule 1.2: use approved words from the dictionary only.");
+        let unrelated = crate::normalize::normalize_words("The quick brown fox jumps over a lazy dog, why not?");
+        assert_eq!(character_overlap_score(&quote, &related), 1.0);
+        // Every letter of the quote is in the pangram; none of its words are.
+        assert_eq!(character_overlap_score(&quote, &unrelated), 0.0);
+        // CJK is compared by character, as before.
+        assert_eq!(character_overlap_score("如是我聞", "我聞如是一時"), 1.0);
     }
 
     #[test]
@@ -1153,7 +1216,7 @@ impl ToolEngine {
             }
         }
 
-        Err(anyhow::anyhow!("Cannot resolve passages.parquet path"))
+        Err(ToolError::MissingPassages { path: default }.into_anyhow())
     }
 
     /// Resolve the phrase index path
@@ -1174,7 +1237,7 @@ impl ToolEngine {
             return Ok(default);
         }
 
-        Err(anyhow::anyhow!("Cannot resolve phrase.index path"))
+        Err(ToolError::MissingPhraseIndex { path: default }.into_anyhow())
     }
 
     /// Resolve the tfidf index path
@@ -1195,7 +1258,7 @@ impl ToolEngine {
             return Ok(default);
         }
 
-        Err(anyhow::anyhow!("Cannot resolve tfidf.index path"))
+        Err(ToolError::MissingTfidfIndex { path: default }.into_anyhow())
     }
 
     /// Resolve the vector index path.
@@ -1310,7 +1373,7 @@ impl ToolEngine {
             return Ok(default);
         }
 
-        Err(anyhow::anyhow!("Cannot resolve catalog.index path"))
+        Err(ToolError::MissingCatalogIndex { path: default }.into_anyhow())
     }
 
     /// Resolve the doc table path
@@ -1331,7 +1394,7 @@ impl ToolEngine {
             return Ok(default);
         }
 
-        Err(anyhow::anyhow!("Cannot resolve doc_table.bin path"))
+        Err(ToolError::MissingDocTable { path: default }.into_anyhow())
     }
 
     /// Resolve the registry path
@@ -1682,7 +1745,12 @@ impl ToolEngine {
         };
 
         let source_work_id = source_work_id.ok_or_else(|| {
-            anyhow::anyhow!("source-read requires source_work_id, passage_id, node_id, or cursor")
+            ToolError::InvalidArgs(
+                "source-read needs one anchor: source_work_id (start of a work), passage_id (read \
+                 around a hit), node_id, or cursor (continue a previous read)"
+                    .to_string(),
+            )
+            .into_anyhow()
         })?;
 
         let mut where_parts = vec![format!("source_work_id = {}", sql_literal(&source_work_id))];
@@ -1933,10 +2001,214 @@ impl ToolEngine {
         })
     }
 
+    /// For a search that matched nothing: the word-layout passages sharing
+    /// the most words with the phrase, and a note on why exact matching
+    /// missed. Both are `None` for a data root without word-layout text, so
+    /// CJK-only corpora answer exactly as before.
+    async fn related_by_words(
+        &self,
+        req: &crate::tools::requests::SearchRequest,
+    ) -> (
+        Option<Vec<crate::tools::responses::SearchHit>>,
+        Option<String>,
+    ) {
+        const RELATED_LIMIT: usize = 5;
+        let has_word_corpus = self
+            .resolve_passages_path()
+            .is_ok_and(|p| crate::normalize::data_root_has_word_corpus(&p));
+        let forms = crate::normalize::PhraseForms::new(&req.phrase);
+        if !has_word_corpus || forms.is_single() || forms.words.trim().is_empty() {
+            return (None, None);
+        }
+        let no_stemming = "Exact search matches whole words and does not stem: try a shorter \
+                           phrase, or other word forms (singular/plural, -ing, -ed) in one \
+                           batch-evidence-search call.";
+
+        let related = async {
+            let tfidf = self.tfidf().await.ok()?;
+            let doc_table = self.doc_table().await.ok()?;
+            let passages = self.passages().await.ok()?;
+            let ranked = tfidf.query_top_k(&forms.words, RELATED_LIMIT * 8);
+            let ids: Vec<String> = ranked
+                .iter()
+                .filter_map(|(doc_id, _)| doc_table.passage_id(*doc_id).map(str::to_string))
+                .collect();
+            if ids.is_empty() {
+                return None;
+            }
+            let rows = passages
+                .passages_by_ids(
+                    &ids,
+                    "passage_id, source_work_id, main_title, heading, zh_text_raw, zh_text_normalized",
+                )
+                .await
+                .ok()?;
+            let mut hits: Vec<crate::tools::responses::SearchHit> = rows
+                .iter()
+                .filter_map(|row| {
+                    let passage_id = row.get("passage_id")?.as_str()?;
+                    let normalized = row.get("zh_text_normalized")?.as_str()?;
+                    if !crate::normalize::has_word_layout(normalized) {
+                        return None;
+                    }
+                    let work = opt_str(row, "source_work_id");
+                    if req.source_work_id.is_some() && work != req.source_work_id {
+                        return None;
+                    }
+                    let score = ranked
+                        .iter()
+                        .find(|(doc_id, _)| doc_table.passage_id(*doc_id) == Some(passage_id))
+                        .map(|(_, score)| *score)?;
+                    Some(crate::tools::responses::SearchHit {
+                        passage_id: passage_id.to_string(),
+                        source_work_id: work,
+                        main_title: opt_str(row, "main_title"),
+                        heading: opt_str(row, "heading"),
+                        zh_quote: row
+                            .get("zh_text_raw")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .chars()
+                            .take(if req.brief { 120 } else { 400 })
+                            .collect(),
+                        score: Some(score),
+                    })
+                })
+                .collect();
+            hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            hits.truncate(RELATED_LIMIT);
+            (!hits.is_empty()).then_some(hits)
+        }
+        .await;
+
+        // Passages holding one of the phrase's rarer words are leads of a
+        // second kind, and the kind the ranking above cannot give: a word
+        // has to be in several passages before it is a TF-IDF feature at
+        // all. Neither list is reliably the better one, so take from each in
+        // turn.
+        let mut by_rare_word = self
+            .passages_with_rare_words(req, &forms.words)
+            .await
+            .into_iter();
+        let mut by_similarity = related.unwrap_or_default().into_iter();
+        let mut leads: Vec<crate::tools::responses::SearchHit> = Vec::new();
+        while leads.len() < RELATED_LIMIT {
+            let pair = [by_rare_word.next(), by_similarity.next()];
+            if pair.iter().all(Option::is_none) {
+                break;
+            }
+            for hit in pair.into_iter().flatten() {
+                if !leads.iter().any(|lead| lead.passage_id == hit.passage_id) {
+                    leads.push(hit);
+                }
+            }
+        }
+        leads.truncate(RELATED_LIMIT);
+        let related = (!leads.is_empty()).then_some(leads);
+
+        let note = match &related {
+            Some(hits) => format!(
+                "No passage contains this exact phrase. related_passages lists {} that share \
+                 several of its words, or one of its rarer words: leads to read with `passage`, \
+                 not matches. {no_stemming}",
+                hits.len()
+            ),
+            None => format!("No passage contains this exact phrase. {no_stemming}"),
+        };
+        (related, Some(note))
+    }
+
+    /// Passages that contain a rare content word of a multi-word phrase,
+    /// those matching the most (and the rarest) words first.
+    async fn passages_with_rare_words(
+        &self,
+        req: &crate::tools::requests::SearchRequest,
+        words: &str,
+    ) -> Vec<crate::tools::responses::SearchHit> {
+        const MAX_WORDS: usize = 8;
+        /// A word in more passages than this says little about any of them.
+        const RARE: usize = 40;
+        let mut content: Vec<&str> = Vec::new();
+        for word in words.split_whitespace() {
+            if crate::tfidf::ngram::keep_word(word) && !content.contains(&word) {
+                content.push(word);
+            }
+        }
+        // One word is what `search` just looked for and did not find.
+        if words.split_whitespace().count() < 2 {
+            return Vec::new();
+        }
+        content.truncate(MAX_WORDS);
+
+        let mut tally: Vec<(f32, crate::tools::responses::SearchHit)> = Vec::new();
+        for word in content {
+            let search = crate::tools::requests::SearchRequest {
+                phrase: word.to_string(),
+                limit: RARE + 1,
+                mode: "hits".to_string(),
+                depth: "exact".to_string(),
+                group_by: "work".to_string(),
+                include_variants: false,
+                limit_per_group: 1,
+                brief: req.brief,
+                canon: None,
+                source_work_id: req.source_work_id.clone(),
+                tradition: None,
+                period: None,
+                origin: None,
+                author: None,
+                title: None,
+                heading_path_prefix: req.heading_path_prefix.clone(),
+            };
+            let Ok(found) = Box::pin(self.search_with(search, false)).await else {
+                continue;
+            };
+            if found.hits.is_empty() || found.hits.len() > RARE {
+                continue;
+            }
+            // 1 for a word in one passage, about 0.2 at the limit: two
+            // shared words outweigh one rarer word.
+            let weight = 1.0 / (1.0 + (found.hits.len() as f32).ln());
+            for hit in found.hits {
+                match tally
+                    .iter_mut()
+                    .find(|(_, seen)| seen.passage_id == hit.passage_id)
+                {
+                    Some((score, _)) => *score += weight,
+                    None => tally.push((weight, hit)),
+                }
+            }
+        }
+        tally.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        tally
+            .into_iter()
+            .map(|(_, mut hit)| {
+                // An excerpt, like the other leads; the score of those is a
+                // similarity, which this is not.
+                if !req.brief {
+                    hit.zh_quote = hit.zh_quote.chars().take(400).collect();
+                }
+                hit.score = None;
+                hit
+            })
+            .collect()
+    }
+
     /// Implement the search tool
     pub async fn search_impl(
         &self,
         req: crate::tools::requests::SearchRequest,
+    ) -> Result<crate::tools::responses::SearchResponse> {
+        self.search_with(req, true).await
+    }
+
+    /// `search`, with or without the leads it offers when nothing matches.
+    /// Finding those leads runs `search` on single words; those inner
+    /// searches pass `false`, so they cannot go looking for leads in turn.
+    async fn search_with(
+        &self,
+        req: crate::tools::requests::SearchRequest,
+        offer_leads: bool,
     ) -> Result<crate::tools::responses::SearchResponse> {
         use crate::datafusion_store::sql_literal;
         use crate::normalize::normalize_zh;
@@ -1946,20 +2218,30 @@ impl ToolEngine {
             ClusterHitsCluster, SearchHit, SearchResponse, SearchStrategy, TermUsageGroup,
         };
 
+        // An unknown value used to fall back to the default without a word,
+        // so `mode: "cluster"` returned plain hits that looked like the answer.
+        let one_of = |name: &str, value: &str, allowed: &[&str]| -> Result<()> {
+            if allowed.contains(&value) {
+                return Ok(());
+            }
+            Err(ToolError::InvalidArgs(format!(
+                "search: `{name}` is \"{value}\"; use one of: {}",
+                allowed.join(", ")
+            ))
+            .into_anyhow())
+        };
+        one_of("mode", &req.mode, &["hits", "clusters", "trace", "all"])?;
+        one_of("depth", &req.depth, &["exact", "expanded", "reuse"])?;
+        one_of("group_by", &req.group_by, &["work", "division"])?;
+
         let passages = self.passages().await?;
         let canon = expand_optional_filter(req.canon.as_deref());
         let tradition = expand_tradition_filter(req.tradition.as_deref());
         let period = expand_period_filter(req.period.as_deref());
         let origin = expand_origin_filter(req.origin.as_deref());
         let normalized = normalize_zh(&req.phrase);
-        let mode = match req.mode.as_str() {
-            "clusters" | "trace" | "all" => req.mode.clone(),
-            _ => "hits".to_string(),
-        };
-        let depth = match req.depth.as_str() {
-            "expanded" | "reuse" => req.depth.as_str(),
-            _ => "exact",
-        };
+        let mode = req.mode.clone();
+        let depth = req.depth.as_str();
 
         let mut phrases = vec![req.phrase.clone()];
         if req.include_variants || matches!(depth, "expanded" | "reuse") {
@@ -2235,6 +2517,15 @@ impl ToolEngine {
             })
             .collect();
 
+        // Nothing matched exactly. In English text that is the usual result
+        // of a question typed as a phrase, so say how matching works and
+        // offer the passages that share the most words instead of a dead end.
+        let (related_passages, note) = if hits.is_empty() && offer_leads {
+            self.related_by_words(&req).await
+        } else {
+            (None, None)
+        };
+
         let clusters = if matches!(mode.as_str(), "clusters" | "all") {
             if let (Some(catalog), Some(doc_table)) = (catalog.as_deref(), doc_table.as_deref()) {
                 let target = match req.group_by.as_str() {
@@ -2453,6 +2744,8 @@ impl ToolEngine {
             brief: req.brief,
             expanded_phrases: phrases,
             hits,
+            related_passages,
+            note,
             clusters,
             trace_groups,
             search_strategy: SearchStrategy {
@@ -3485,9 +3778,10 @@ impl ToolEngine {
         let passages = self.passages().await?;
 
         // doc_id lookup
+        validate_passage_input("expand-context-adaptive", &req.passage_id)?;
         let doc_id = doc_table
             .doc_id(&req.passage_id)
-            .ok_or_else(|| anyhow::anyhow!("passage not found in doc_table: {}", req.passage_id))?;
+            .ok_or_else(|| passage_not_found(&req.passage_id))?;
         let mut node_id = *catalog.doc_parent.get(&doc_id).ok_or_else(|| {
             anyhow::anyhow!("doc_id {} has no catalog node (rebuild catalog?)", doc_id)
         })?;
@@ -3539,27 +3833,117 @@ impl ToolEngine {
             .last_doc_id
             .ok_or_else(|| anyhow::anyhow!("node has no doc range"))?;
 
-        // Fetch every passage with doc_id in [first, last] for the selected work
-        let mut passage_ids: Vec<String> = Vec::with_capacity((last - first + 1) as usize);
-        for did in first..=last {
+        // The selected node need not fit the budget. The climb stops at the
+        // work, and a document with no divisions (a PDF from document
+        // intake) is one node however long it is; the catalog also sizes
+        // nodes by CJK characters, so it reports an English document as
+        // empty. The budget is therefore kept against the text itself: when
+        // the node is over it, the passages around the seed are returned
+        // instead of the whole node.
+        const WINDOW_REACH: u32 = 64;
+        // A node the catalog measured as mostly CJK and within the budget is
+        // returned whole, exactly as before.
+        let catalog_fits = (selected.cjk_char_count as usize) <= req.max_chars
+            && selected.cjk_char_count >= selected.passage_count.saturating_mul(20);
+        let whole_node = catalog_fits || last - first <= 2 * WINDOW_REACH;
+        let (lo, hi) = if whole_node {
+            (first, last)
+        } else {
+            (
+                doc_id.saturating_sub(WINDOW_REACH).max(first),
+                doc_id.saturating_add(WINDOW_REACH).min(last),
+            )
+        };
+        let mut wanted: Vec<String> = Vec::with_capacity((hi - lo + 1) as usize);
+        for did in lo..=hi {
             if let Some(pid) = doc_table.passage_id(did) {
-                passage_ids.push(pid.to_string());
+                wanted.push(pid.to_string());
             }
         }
 
-        let rows = passages
+        let fetched = passages
             .passages_by_ids(
-                &passage_ids,
+                &wanted,
                 "passage_id, main_title, source_work_id, source_rel_path, \
              from_lb, to_lb, period, zh_text_normalized as zh_text",
             )
             .await?;
+        let text_len = |row: &serde_json::Value| -> usize {
+            row.get("zh_text")
+                .and_then(|v| v.as_str())
+                .map_or(0, |t| t.chars().count())
+        };
 
-        let char_count: usize = rows
-            .iter()
-            .filter_map(|r| r.get("zh_text").and_then(|v| v.as_str()))
-            .map(|t| t.chars().count())
-            .sum();
+        let node_fits = catalog_fits
+            || (whole_node && fetched.iter().map(&text_len).sum::<usize>() <= req.max_chars);
+        let rows: Vec<serde_json::Value> = if node_fits {
+            fetched
+        } else {
+            // Put the window in reading order, then grow outwards from the
+            // seed, one passage after and one before in turn, while the
+            // budget allows. The seed is always returned.
+            let mut by_id: FxHashMap<String, serde_json::Value> = fetched
+                .into_iter()
+                .filter_map(|row| {
+                    let pid = row.get("passage_id")?.as_str()?.to_string();
+                    Some((pid, row))
+                })
+                .collect();
+            let ordered: Vec<serde_json::Value> =
+                wanted.iter().filter_map(|pid| by_id.remove(pid)).collect();
+            let seed_at = ordered
+                .iter()
+                .position(|row| {
+                    row.get("passage_id").and_then(|v| v.as_str()) == Some(req.passage_id.as_str())
+                })
+                .ok_or_else(|| {
+                    ToolError::PassageNotFound {
+                        passage_id: req.passage_id.clone(),
+                    }
+                    .into_anyhow()
+                })?;
+            let (mut start, mut end) = (seed_at, seed_at + 1);
+            let mut used = text_len(&ordered[seed_at]);
+            let (mut grow_back, mut grow_on) = (true, true);
+            while grow_back || grow_on {
+                if grow_on {
+                    match ordered.get(end).map(&text_len) {
+                        Some(len) if used + len <= req.max_chars => {
+                            used += len;
+                            end += 1;
+                        }
+                        _ => grow_on = false,
+                    }
+                }
+                if grow_back {
+                    match start.checked_sub(1).map(|i| text_len(&ordered[i])) {
+                        Some(len) if used + len <= req.max_chars => {
+                            used += len;
+                            start -= 1;
+                        }
+                        _ => grow_back = false,
+                    }
+                }
+            }
+            ordered.into_iter().skip(start).take(end - start).collect()
+        };
+
+        let char_count: usize = rows.iter().map(&text_len).sum();
+        let truncation = (!node_fits).then(|| {
+            format!(
+                "{} has {} passages, more than the budget of {} characters holds: only the {} \
+                 around the seed are returned. Use source-read with this passage_id to read on \
+                 in either direction.",
+                if selected.label.is_empty() {
+                    "This section"
+                } else {
+                    selected.label.as_str()
+                },
+                selected.passage_count,
+                req.max_chars,
+                rows.len(),
+            )
+        });
 
         Ok(ExpandContextAdaptiveResponse {
             schema: "sinorag-expand-context-adaptive-v1",
@@ -3571,6 +3955,8 @@ impl ToolEngine {
             work_id: Some(selected.work_id.clone()),
             passage_count: rows.len(),
             char_count,
+            truncated: truncation.is_some(),
+            truncation,
             passages: rows,
             search_strategy: SearchStrategyInfoAdaptive {
                 budget: req.max_chars,
@@ -3992,11 +4378,37 @@ impl ToolEngine {
                 let window_end =
                     (char_pos + phrase_chars + req.window_chars).min(norm.chars().count());
 
-                let window_text: String = norm
-                    .chars()
-                    .skip(window_start)
-                    .take(window_end - window_start)
-                    .collect();
+                let window_text: String = if crate::normalize::has_word_layout(norm) {
+                    // Whole words on either side of the occurrence. The
+                    // phrase itself is left out (it would always be its own
+                    // strongest collocate), and so is a word the window
+                    // boundary cuts through.
+                    let before: String = norm
+                        .chars()
+                        .skip(window_start)
+                        .take(char_pos - window_start)
+                        .collect();
+                    let after: String = norm
+                        .chars()
+                        .skip(char_pos + phrase_chars)
+                        .take(window_end.saturating_sub(char_pos + phrase_chars))
+                        .collect();
+                    let before = match before.find(' ') {
+                        Some(cut) if window_start > 0 => &before[cut..],
+                        _ => before.as_str(),
+                    };
+                    let after = match after.rfind(' ') {
+                        Some(cut) if window_end < norm.chars().count() => &after[..cut],
+                        _ => after.as_str(),
+                    };
+                    // "|" is not a word, so no term spans the gap.
+                    format!("{before} | {after}")
+                } else {
+                    norm.chars()
+                        .skip(window_start)
+                        .take(window_end - window_start)
+                        .collect()
+                };
                 near_total += count_unique_ngrams_with_terms(
                     &window_text,
                     req.gram_len,
@@ -4309,12 +4721,13 @@ impl ToolEngine {
             && req.work_id.is_none()
         {
             let search = self
-                .search_impl(crate::tools::requests::SearchRequest {
+                .search_with(crate::tools::requests::SearchRequest {
                     phrase: req.phrase.clone(),
                     limit: req.limit_total,
                     mode: "hits".to_string(),
                     depth: "exact".to_string(),
-                    group_by: req.group_by.clone(),
+                    // Unused in `hits` mode; outline-search has its own values.
+                    group_by: "work".to_string(),
                     include_variants: false,
                     limit_per_group: req.limit_per_group,
                     brief: true,
@@ -4326,7 +4739,7 @@ impl ToolEngine {
                     author: None,
                     title: None,
                     heading_path_prefix: None,
-                })
+                }, false)
                 .await?;
             let mut counts = std::collections::BTreeMap::<String, u32>::new();
             for hit in &search.hits {
@@ -4740,9 +5153,10 @@ impl ToolEngine {
         let loading_index_ms = load_started.elapsed().as_millis();
         let doc_table = self.doc_table().await?;
         let (query_mode, seed_passage_id, query) = if let Some(seed) = req.seed_passage_id.clone() {
-            let doc_id = doc_table.doc_id(&seed).ok_or_else(|| {
-                anyhow::anyhow!("Seed passage not found in DocumentTable: {seed}")
-            })?;
+            validate_passage_input("vector-neighbors", &seed)?;
+            let doc_id = doc_table
+                .doc_id(&seed)
+                .ok_or_else(|| passage_not_found(&seed))?;
             let query = vector
                 .vector_for_doc_id(doc_id)
                 .ok_or_else(|| anyhow::anyhow!("Seed doc_id {doc_id} has no vector row"))?;
@@ -6147,12 +6561,13 @@ impl ToolEngine {
 
         use futures::{stream, StreamExt};
 
+        self.resolve_passages_path()?;
         let limit = req.limit;
         let concurrency = req.concurrency.clamp(1, 8);
         let mut results = stream::iter(req.phrases.into_iter().enumerate().map(
             |(index, phrase)| async move {
                 let result = match self
-                    .search_impl(crate::tools::requests::SearchRequest {
+                    .search_with(crate::tools::requests::SearchRequest {
                         phrase: phrase.clone(),
                         limit,
                         mode: "hits".to_string(),
@@ -6169,7 +6584,7 @@ impl ToolEngine {
                         author: None,
                         title: None,
                         heading_path_prefix: None,
-                    })
+                    }, false)
                     .await
                 {
                     Ok(search_result) => {
@@ -7738,9 +8153,28 @@ fn merge_person_mention(row: &mut serde_json::Value, form: &str, is_primary: boo
     }
 }
 
+/// How much of `query` a passage covers, 0.0 to 1.0. `query` is the quote in
+/// the passage's own layout (`PhraseForms::form_for`). Word-layout text is
+/// compared word by word: nearly every English passage holds every letter of
+/// the alphabet, so a character comparison would score them all 1.0.
 fn character_overlap_score(query: &str, text: &str) -> f64 {
     if query.is_empty() || text.is_empty() {
         return 0.0;
+    }
+    if crate::normalize::has_word_layout(text) {
+        let words = |s: &'_ str| -> std::collections::BTreeSet<String> {
+            s.split(' ')
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        let query_words = words(query);
+        if query_words.is_empty() {
+            return 0.0;
+        }
+        let text_words = words(text);
+        let shared = query_words.intersection(&text_words).count();
+        return shared as f64 / query_words.len() as f64;
     }
     let query_chars: std::collections::BTreeSet<char> = query.chars().collect();
     let text_chars: std::collections::BTreeSet<char> = text.chars().collect();

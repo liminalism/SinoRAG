@@ -14,6 +14,15 @@ pub struct SearchResponse {
     pub brief: bool,
     pub expanded_phrases: Vec<String>,
     pub hits: Vec<SearchHit>,
+    /// Only when nothing matched exactly and the collection holds English
+    /// (word-layout) text: the passages that share the most words with the
+    /// phrase, best first, each with a `score`. They are leads, not matches:
+    /// read one before quoting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_passages: Option<Vec<SearchHit>>,
+    /// Why there are no hits and what to try, when that is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clusters: Option<Vec<ClusterHitsCluster>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -380,6 +389,12 @@ pub struct ExpandContextAdaptiveResponse {
     pub work_id: Option<String>,
     pub passage_count: usize,
     pub char_count: usize,
+    /// True when the selected node was larger than the budget and only the
+    /// passages around the seed are returned.
+    pub truncated: bool,
+    /// What was left out and how to read on, when `truncated`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<String>,
     pub passages: Vec<serde_json::Value>,
     pub search_strategy: SearchStrategyInfoAdaptive,
 }

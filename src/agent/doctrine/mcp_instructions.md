@@ -3,7 +3,9 @@
 This server exposes the SinoRAG corpus-research toolset over MCP. Each tool
 returns a JSON envelope `{ ok, tool, result | error, meta }`. Read `error.code`
 when `ok` is false — common codes include `unknown_tool`, `readonly_violation`,
-`admin_tool_disabled`, and `missing_artifact`.
+`admin_tool_disabled`, `invalid_args`, `passage_not_found`, and the
+`missing_*` codes (corpus or index not built). `error.suggested_command`
+says what to do instead.
 
 All corpus access goes through this server's tools — do not shell out to
 `sinorag` directly when an MCP tool exists for the same operation.
@@ -88,7 +90,8 @@ call without issuing another tool call concurrently.
   inference, describe zero hits as absence in the loaded corpus rather than
   proof of nonexistence, and do not turn the earliest loaded attestation into
   an unsupported claim about historical origin.
-- Tool errors with `code = missing_artifact` mean the relevant index has
-  not been built; surface this to the user rather than guessing.
+- Tool errors whose `code` starts with `missing_` mean the corpus or one of
+  its indexes has not been built; tell the user what `suggested_command`
+  says rather than guessing or retrying.
 - Prefer JSON-ready output when the next consumer is another tool; prefer
   prose when the next consumer is the user.

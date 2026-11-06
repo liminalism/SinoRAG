@@ -8,8 +8,12 @@ use sinorag::{cli, commands};
 // overflow the default 1 MiB Windows main-thread stack at startup.
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    // Logs go to stderr. The default writer is stdout, which `sinorag mcp`
+    // reserves for JSON-RPC: one warning there and the client drops the
+    // connection as a protocol error.
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
         .init();
 
     // Resolve all relative paths (e.g. "data/...") against the exe's directory

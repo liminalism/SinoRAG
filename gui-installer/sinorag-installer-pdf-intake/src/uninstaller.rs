@@ -6,7 +6,7 @@ fn main() {
 #[cfg(target_os = "windows")]
 fn main() {
     use sinorag_intake::win_utils::{
-        classify_install_folder, delete_uninstall_entry, desktop_shortcut_path,
+        classify_install_folder, delete_uninstall_entry, desktop_shortcut_path, foreign_entries,
         read_install_location, sinorag_is_running, start_menu_intake_shortcut_path,
         start_menu_shortcut_path, try_single_instance, InstallFolder,
     };
@@ -77,6 +77,20 @@ fn main() {
         println!("This removes SinoRAG, the indexed document text and all indexes.");
         println!("EVERYTHING in that folder is deleted.");
         println!("Your original PDF, HTML and text files are not touched.");
+        // Anything else there was saved by the user or by a chat session.
+        let others = foreign_entries(&install_dir);
+        if !others.is_empty() {
+            println!();
+            println!("The folder also holds these, which SinoRAG did not put there. They are deleted too;");
+            println!("move them out first if you want to keep them:");
+            for name in others.iter().take(15) {
+                println!("  {name}");
+            }
+            if others.len() > 15 {
+                println!("  ... and {} more", others.len() - 15);
+            }
+            println!();
+        }
     } else {
         println!("That folder is already gone. This removes the shortcuts and the uninstall entry.");
     }
@@ -111,6 +125,23 @@ fn main() {
     // removes it when it is empty.
     if let Some(folder) = start_menu_shortcut_path().and_then(|p| p.parent().map(PathBuf::from)) {
         let _ = std::fs::remove_dir(folder);
+    }
+
+    // AI apps the intake connected: drop the entries that start this install.
+    if let Some(loc) = sinorag_intake::mcp_clients::Locations::from_env() {
+        use sinorag_intake::mcp_clients::{detect_clients, unregister, Change, SERVER_NAME};
+        let exe = install_dir.join("sinorag.exe");
+        for outcome in unregister(&detect_clients(&loc), &exe) {
+            match outcome.result {
+                Ok(Change::Removed) => println!(
+                    "Removed MCP server \"{SERVER_NAME}\" from {} ({}).",
+                    outcome.client,
+                    outcome.config.display()
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("Warning: could not update {}: {e}", outcome.client),
+            }
+        }
     }
 
     delete_uninstall_entry();

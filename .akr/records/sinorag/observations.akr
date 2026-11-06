@@ -20,7 +20,7 @@ record sinorag.intake.shared-payload-stale/1 : observation {
 
 record sinorag.intake.shared-payload-stale/2 : observation {
     title "Shared installer payload sinorag.7z holds sinorag.exe 0.5.0, not the 0.5.5 source"
-    state verified
+    state superseded
     scope [
         path "gui-installer/sinorag-installer-pdf-intake/**",
         path "gui-installer/sinorag-installer-winsafe/**",
@@ -33,5 +33,27 @@ record sinorag.intake.shared-payload-stale/2 : observation {
     method command
     watches [ "gui-installer/sinorag-installer/sinorag.7z", "Cargo.toml" ]
     supersedes [ @sinorag.intake.shared-payload-stale/1 ]
+    author "dk"
+}
+
+record sinorag.intake.shared-payload-stale/3 : observation {
+    title "Shared installer payload sinorag.7z holds sinorag.exe 0.5.0 and is no longer tracked"
+    state verified
+    scope [
+        path "gui-installer/sinorag-installer-pdf-intake/**",
+        path "gui-installer/sinorag-installer-winsafe/**",
+        path "gui-installer/sinorag-installer/sinorag.7z"
+    ]
+    statement """
+        gui-installer/sinorag-installer/sinorag.7z (21,131,926 bytes) unpacks to a sinorag.exe built 2026-05-28 that reports `sinorag 0.5.0`; Cargo.toml is at 0.5.5. That exe has no text_profile support: over indexes built by the document intake (text_profile = "words") the phrases "COOLANT Pump" and "heron colony" return 0 hits and the fragment "pum" returns 1, where a 0.5.5 release build returns 1, 1 and 0. The file is no longer tracked: commit 23e3fd8 removed it from the index and added it to .gitignore (line 11), at the owner's request because it is old; it is still on disk in this checkout. The Freya and winsafe CBETA installers embed this payload and read their expected version from Cargo.toml, so a fresh clone cannot build them until a payload is packed there, and with the stale file they re-extract it on every run. The document intake embeds its own tracked gui-installer/sinorag-installer-pdf-intake/sinorag.7z (0.5.5, packed by make-payload.ps1); its build.rs falls back to the shared file only when that one is missing, and then refuses it for the version mismatch.
+        """
+    observed_at git:ffd166fa97b73eeb40f517036f18cc95af7d96b5
+    method command
+    watches [
+        ".gitignore",
+        "Cargo.toml",
+        "gui-installer/sinorag-installer-pdf-intake/build.rs"
+    ]
+    supersedes [ @sinorag.intake.shared-payload-stale/2 ]
     author "dk"
 }

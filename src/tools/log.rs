@@ -19,6 +19,10 @@ pub struct ToolCallLogRecord {
     pub elapsed_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// The error text the caller was shown. The code alone cannot tell a
+    /// misspelled argument from a server fault when the log is read later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     pub args_summary: Value,
     pub result_summary: Value,
 }
@@ -83,6 +87,7 @@ pub fn append_call_at(
         ok: error.is_none(),
         elapsed_ms,
         error_code: error.map(|err| err.code.clone()),
+        error_message: error.map(|err| err.message.chars().take(300).collect()),
         args_summary: summarize_value(args),
         result_summary: result
             .map(summarize_tool_result)

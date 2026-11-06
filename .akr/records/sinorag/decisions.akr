@@ -7,14 +7,53 @@ record sinorag.intake.document-intake-gui/1 : decision {
     scope [ path "gui-installer/sinorag-installer-pdf-intake/**" ]
     topic document-intake
     decision """
-        gui-installer/sinorag-installer-pdf-intake is a winsafe installer variant that installs SinoRAG into its own folder (SinoRAG-Documents, own uninstall key, shortcuts and mutex) and indexes local PDF, HTML and .txt files. PDFs go through the Lege pipeline (lege-pdf-agent text_pages, plain layout, ocr=auto via Windows.Media.Ocr) with a forced-OCR retry for pages whose text layer scores as garbled. Each document is stored once under intake/docs/<work_id>/ (keyed by SHA-256 in intake/manifest.json); every run reassembles intake/cef from the manifest, replaces the source_corpus=documents partition through cef::ingest_blocking and rebuilds all indexes through init::build_local_indexes_with(SMALL_COLLECTION). The corpus uses text_profile = "words". The embedded sinorag.exe payload must be built from the same source as the intake (make-payload.ps1 writes ./sinorag.7z; build.rs fails the build when the payload's `sinorag.exe --version` differs from the checkout's). The install folder is the intake's alone: it refuses a folder holding other files or another source_corpus partition, and the uninstaller deletes the folder only when it classifies as an intake install. intake/index-state.json records the work_ids the indexes were built from; a run rebuilds whenever it differs from the manifest.
+        gui-installer/sinorag-installer-pdf-intake is a winsafe installer variant that installs SinoRAG into its own folder (SinoRAG-Documents, own uninstall key, shortcuts and mutex) and indexes local PDF, HTML and .txt files. PDFs go through the Lege pipeline (lege-pdf-agent text_pages, plain layout, ocr=auto via Windows.Media.Ocr) with a forced-OCR retry for pages whose text layer scores as garbled. A .txt or .html file that is really something else (a known file signature, or content with more than 2% control characters once decoded) is refused with what it is and what to add instead. Each document is stored once under intake/docs/<work_id>/ (keyed by SHA-256 in intake/manifest.json); every run reassembles intake/cef from the manifest, replaces the source_corpus=documents partition through cef::ingest_blocking and rebuilds all indexes through init::build_local_indexes_with(SMALL_COLLECTION). The corpus uses text_profile = "words". The embedded sinorag.exe payload must be built from the same source as the intake (make-payload.ps1 writes ./sinorag.7z; build.rs fails the build when the payload's `sinorag.exe --version` differs from the checkout's). The install records the SHA-256 of the payload archive it unpacked in intake/payload.sha256, and a run replaces sinorag.exe when either the version or that hash differs from the installer's own, so a rebuilt installer of the same version still updates an existing install. The install folder is the intake's alone: it refuses a folder holding other files or another source_corpus partition, and the uninstaller deletes the folder only when it classifies as an intake install, after listing any entries that neither the intake nor SinoRAG created. intake/index-state.json records the work_ids the indexes were built from; a run rebuilds whenever it differs from the manifest. The finish log names a way to start asking questions that the run actually created, and prints the command another MCP client needs.
         """
     context """
-        User request: let someone index a set of PDFs (plus HTML and text, nothing more complex) so a model can answer questions from them over MCP; the GUI doubles as the installer and can be re-run to add documents.
+        User request: let someone index a set of PDFs (plus HTML and text, nothing more complex) so a model can answer questions from them over MCP; the GUI doubles as the installer and can be re-run to add documents. Revised 2026-11-06 after a refinement pass ahead of sending it to another person.
         """
     consequences """
-        Lege-ecosystem must be checked out next to SinoRAG (path dependencies on lege-pdf/agent and pdf-text). Re-ingesting shifts doc ids, so vector.index is deleted on rebuild. Removing a document is not supported yet. The headless example intake_cli runs the same pipeline for testing. The payload has to be re-packed after every SinoRAG source change. A running sinorag.exe in the install folder (agent window, MCP server) blocks both a rebuild and an uninstall, because it keeps the indexes memory-mapped; both check for it first. Shortcuts and the uninstall entry are written before indexing, so a failed or closed run leaves a removable install.
+        Lege-ecosystem must be checked out next to SinoRAG (path dependencies on lege-pdf/agent and pdf-text). Re-ingesting shifts doc ids, so vector.index is deleted on rebuild. Removing a document is not supported yet. The headless example intake_cli runs the same pipeline for testing. The payload has to be re-packed after every SinoRAG source change. A running sinorag.exe in the install folder (agent window, MCP server) blocks both a rebuild and an uninstall, because it keeps the indexes memory-mapped; both check for it first. Shortcuts and the uninstall entry are written before indexing, so a failed or closed run leaves a removable install. An install made before the payload marker existed has its sinorag.exe replaced once on the next run. A chat session runs with the install folder as its working directory, so files a model saves land there and go with the folder on uninstall unless moved.
         """
+    supported_by [ @sinorag.evidence.mcp-surface-refinement-run ]
+}
+
+record sinorag.intake.mcp-client-registration/1 : decision {
+    title "Document Intake registers sinorag-documents MCP server with detected AI apps"
+    state proposed
+    scope [ path "gui-installer/sinorag-installer-pdf-intake/**" ]
+    decision """
+        The intake installer ("Connect AI apps" checkbox) adds an MCP stdio server named sinorag-documents (<install>\sinorag.exe mcp, env SINORAG_TOOL_LOG=<install>\.sinorag\tool_calls.jsonl) to the user-level config of each detected client: Claude Desktop (classic and MSIX package LocalCache), Claude Code (~/.claude.json), Codex (config.toml via toml_edit), Cursor, Windsurf, VS Code/Insiders (servers + type stdio), Gemini CLI, LM Studio. Only that entry is touched; unparseable files (JSONC) are left alone and reported; a .sinorag-backup copy is kept before the first change. The uninstaller removes the entry where its command still equals this install's sinorag.exe. Both exes embed a multi-size SinoRAG icon (resource id 1) and VERSIONINFO via embed-resource; make-release.ps1 zips the release.
+        """
+    context """
+        User asked for MCP registration across agent clients, an applied exe icon, and a GitHub release package.
+        """
+    consequences """
+        JSON configs are re-serialized with serde_json (keys may be reordered; preserve_order not enabled to avoid changing sinorag lib output). A running client keeps sinorag.exe open, so it must be quit before adding documents or uninstalling. Building needs rc.exe from the Windows SDK. OpenCode is excluded since sinorag agent writes its own project config.
+        """
+    author "dk"
+}
+
+record sinorag.mcp.client-facing-surface/1 : decision {
+    title "MCP surface: no output schemas, arguments checked at the boundary, tool list and instructions follow the data root"
+    state proposed
+    scope [
+        path "src/agent/**",
+        path "src/mcp/**",
+        path "src/tools/**",
+        path "tests/mcp_stdio.rs"
+    ]
+    topic mcp-surface
+    decision """
+        The stdio MCP server (src/mcp/server.rs) presents this surface. (1) tools/list advertises no outputSchema; `sinorag tools-manifest` still carries them. (2) The server names itself `sinorag` with the crate version and offers rmcp's newest protocol version, so rmcp negotiates down to the client's. (3) A tool the session cannot run is not listed: file-writing tools in a read-only session, admin tools without --allow-admin-tools, vector-neighbors without a vector index, and the CBETA catalogue tools (canonical-source, first-attestation, phrase-history, trace-term-usage, seed-pick, person-*, place-resolve) on a data root holding only word-layout corpora. Unlisted tools remain callable by name. (4) registry::call_tool checks arguments against the tool's input schema before the handler runs: unknown, missing, blank-required and mistyped arguments are refused as `invalid_args` naming the accepted and required arguments, with a did-you-mean for near names. `search` refuses unknown mode/depth/group_by values. (5) A missing corpus or index is a typed `missing_*` error whose suggested_command tells the model what to tell the user (run document intake when sinorag-intake.exe sits beside the exe). (6) Each call runs on its own task, so a panic is an error result for that call. (7) A data root with only word-layout corpora gets src/agent/doctrine/documents.md as server instructions and as the AGENTS.md managed block; a root with CBETA keeps the research doctrine, plus word_corpus.md when it also holds word-layout text. (8) `search` with no exact hit on a word corpus returns `related_passages` (up to 5 leads, taken alternately from passages holding the phrase's rarer words and from TF-IDF similarity) and a `note`; the inner single-word searches cannot themselves ask for leads. (9) `sinorag agent` merges its `sinorag` entry into an existing .opencode/opencode.json, and when it fails while owning its console window it explains and waits for Enter.
+        """
+    context """
+        Review of AKR's MCP server and its usage history (D:/projects/AKR) for lessons applicable here, ahead of sending the document-intake installer to another person. Measured before the change on a 434-page PDF corpus: tools/list was 117,708 characters for 42 tools, 77 KB of it output schemas; the official TypeScript SDK client (@modelcontextprotocol/sdk 1.32.2) rejected the whole tools/list because schemars writes `true` as the schema of serde_json::Value fields; the server introduced itself as `rmcp` and pinned protocol 2024-11-05; SinoRAG's own tool log held 12 `internal_error` results caused by misnamed arguments (`search {pattern}`, `origin` as an array); a search before anything was indexed answered `internal_error: Cannot resolve passages.parquet path`; a documents-only root received the CBETA/Chan research doctrine.
+        """
+    consequences """
+        tools/list is about 38 KB for 27 tools on a documents root. Clients that validated structured content against outputSchema lose nothing: the result was always wrapped in the {ok, tool, result|error, meta} envelope, which no advertised schema described. A caller that relied on unknown arguments being ignored now gets invalid_args. search falls back to up to eight single-word lookups when a multi-word phrase has no hit (about 10 ms each on a 921-passage corpus). A stack overflow is not a panic and still ends the process.
+        """
+    author "dk"
 }
 
 record sinorag.search.word-layout-normalization/1 : decision {

@@ -18,6 +18,7 @@
 
 pub mod corpus;
 pub mod extract;
+pub mod mcp_clients;
 pub mod pipeline;
 
 #[cfg(target_os = "windows")]

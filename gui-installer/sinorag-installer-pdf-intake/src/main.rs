@@ -13,8 +13,12 @@
 #[cfg(target_os = "windows")]
 mod app {
     use anyhow::{anyhow, Context, Result};
-    use sinorag_intake::corpus::CorpusStore;
+    use sinorag_intake::corpus::{installed_payload_id, payload_id, record_payload_id, CorpusStore};
     use sinorag_intake::extract::{DocKind, ExtractOptions};
+    use sinorag_intake::mcp_clients::{
+        detect_clients, register as register_mcp, registered_anywhere, Change, Client as McpClient, Locations,
+        SERVER_NAME,
+    };
     use sinorag_intake::pipeline::{intake_root, run_intake, IntakeEvent, IntakeOptions, IntakeSummary};
     use sinorag_intake::win_utils::{
         classify_install_folder, default_install_path, desktop_shortcut_path,
@@ -98,6 +102,8 @@ mod app {
         start_menu_shortcut: bool,
         build_lexical: bool,
         install_opencode: bool,
+        /// AI apps to add the MCP server to (empty: none).
+        mcp_clients: Vec<McpClient>,
     }
 
     #[derive(Debug)]
@@ -144,6 +150,8 @@ mod app {
         start_menu_cb: gui::CheckBox,
         lexical_cb: gui::CheckBox,
         opencode_cb: gui::CheckBox,
+        mcp_cb: gui::CheckBox,
+        mcp_clients: Rc<Vec<McpClient>>,
         step_label: gui::Label,
         progress_bar: gui::Label,
         log_edit: gui::Edit,
@@ -227,6 +235,8 @@ mod app {
 
             let wnd = gui::WindowMain::new(gui::WindowMainOpts {
                 title: WINDOW_TITLE,
+                // The icon build.rs embeds as resource 1.
+                class_icon: gui::Icon::Id(1),
                 size: gui::dpi(W, H),
                 style: co::WS::CAPTION | co::WS::SYSMENU | co::WS::MINIMIZEBOX,
                 ex_style: co::WS_EX::LEFT | co::WS_EX::ACCEPTFILES,
@@ -311,6 +321,29 @@ mod app {
             let lexical_cb = checkbox(&wnd, "Phrase and TF-IDF indexes", 20, 364, true);
             // Adding documents to an existing install should not start installing other software.
             let opencode_cb = checkbox(&wnd, "OpenCode integration", 290, 364, !reinstall);
+            // Same rule for the AI apps: a re-run keeps their entries current,
+            // but does not bring one back that the user took out.
+            let mcp_clients = Locations::from_env().map(|loc| detect_clients(&loc)).unwrap_or_default();
+            let mcp_label = if mcp_clients.is_empty() {
+                "Connect AI apps (none found: Claude, Codex, Cursor, VS Code, Gemini...)".to_string()
+            } else {
+                let names: Vec<&str> = mcp_clients.iter().map(|c| c.name.as_str()).collect();
+                format!("Connect AI apps: {}", names.join(", "))
+            };
+            let mcp_cb = gui::CheckBox::new(
+                &wnd,
+                gui::CheckBoxOpts {
+                    text: &mcp_label,
+                    position: gui::dpi(20, 388),
+                    size: gui::dpi(W - 40, 24),
+                    check_state: if !mcp_clients.is_empty() && (!reinstall || registered_anywhere(&mcp_clients)) {
+                        co::BST::CHECKED
+                    } else {
+                        co::BST::UNCHECKED
+                    },
+                    ..Default::default()
+                },
+            );
 
             // One line: a status longer than the window ends in "…" instead of
             // wrapping out of sight, and an "&" in a file name stays an "&".
@@ -318,7 +351,7 @@ mod app {
                 &wnd,
                 gui::LabelOpts {
                     text: "Add documents, then press the button below.",
-                    position: gui::dpi(20, 398),
+                    position: gui::dpi(20, 420),
                     size: gui::dpi(W - 40, 20),
                     control_style: co::SS::LEFT | co::SS::NOTIFY | co::SS::NOPREFIX | co::SS::ENDELLIPSIS,
                     ..Default::default()
@@ -328,18 +361,18 @@ mod app {
                 &wnd,
                 gui::LabelOpts {
                     text: "",
-                    position: gui::dpi(20, 422),
+                    position: gui::dpi(20, 444),
                     size: gui::dpi(W - 40, 18),
                     control_style: co::SS::OWNERDRAW,
                     ..Default::default()
                 },
             );
-            let (log_w, log_h) = gui::dpi(W - 40, 122);
+            let (log_w, log_h) = gui::dpi(W - 40, 100);
             let log_edit = gui::Edit::new(
                 &wnd,
                 gui::EditOpts {
                     text: "",
-                    position: gui::dpi(20, 448),
+                    position: gui::dpi(20, 470),
                     width: log_w,
                     height: log_h,
                     control_style: co::ES::MULTILINE | co::ES::AUTOVSCROLL | co::ES::READONLY | co::ES::WANTRETURN,
@@ -377,6 +410,8 @@ mod app {
                 start_menu_cb,
                 lexical_cb,
                 opencode_cb,
+                mcp_cb,
+                mcp_clients: Rc::new(mcp_clients),
                 step_label,
                 progress_bar,
                 log_edit,
@@ -424,6 +459,7 @@ mod app {
                         me.start_menu_cb.hwnd(),
                         me.lexical_cb.hwnd(),
                         me.opencode_cb.hwnd(),
+                        me.mcp_cb.hwnd(),
                         me.step_label.hwnd(),
                         me.log_edit.hwnd(),
                     ]);
@@ -710,6 +746,7 @@ mod app {
                 start_menu_shortcut: self.start_menu_cb.is_checked(),
                 build_lexical: self.lexical_cb.is_checked(),
                 install_opencode: self.opencode_cb.is_checked(),
+                mcp_clients: if self.mcp_cb.is_checked() { (*self.mcp_clients).clone() } else { Vec::new() },
             };
 
             for item in self.file_list.items().iter() {
@@ -786,9 +823,26 @@ mod app {
                     }
                     self.set_step(&status)?;
                     if summary.rebuilt {
+                        let exe = PathBuf::from(self.path_edit.hwnd().GetWindowText()?.trim()).join("sinorag.exe");
+                        // Name a way in that this run actually created.
+                        let opener = if self.start_menu_cb.is_checked() {
+                            "open \"SinoRAG Documents\" from the Start Menu".to_string()
+                        } else if self.desktop_cb.is_checked() {
+                            "open the \"SinoRAG Documents\" shortcut on the desktop".to_string()
+                        } else {
+                            format!("run \"{}\" agent", exe.display())
+                        };
+                        self.append_log(&format!(
+                            "To ask questions: {opener}. It starts OpenCode with these documents connected."
+                        ))?;
+                        self.append_log(&format!(
+                            "To use another MCP client (Claude Desktop, Claude Code, Cursor, ...): add a \
+                             local (stdio) server whose command is \"{}\" with the single argument: mcp",
+                            exe.display()
+                        ))?;
                         self.append_log(
-                            "Ask questions with the \"SinoRAG Documents\" shortcut (OpenCode), or point any \
-                             MCP client at `sinorag.exe mcp` run from the install folder.",
+                            "Close those before adding more documents here: a running session keeps the \
+                             indexes open.",
                         )?;
                     }
                     self.set_controls_enabled(true)?;
@@ -818,6 +872,7 @@ mod app {
                 self.start_menu_cb.hwnd(),
                 self.lexical_cb.hwnd(),
                 self.opencode_cb.hwnd(),
+                self.mcp_cb.hwnd(),
             ] {
                 hwnd.EnableWindow(enabled);
             }
@@ -936,14 +991,25 @@ mod app {
 
         // ── Install / upgrade SinoRAG itself ────────────────────────────────
         step("Checking SinoRAG", 0.01);
+        // The same version is not the same program: compare the payload this
+        // installer carries with the one the folder was last given.
+        let payload = payload_id(PAYLOAD_7Z);
+        let same_payload = installed_payload_id(&request.install_path).as_deref() == Some(payload.as_str());
         match installed_sinorag_version(&exe_path) {
-            Some(v) if v == EXPECTED_SINORAG_VERSION => log(format!("SinoRAG {v} is already installed.")),
+            Some(v) if v == EXPECTED_SINORAG_VERSION && same_payload => {
+                log(format!("SinoRAG {v} is already installed."))
+            }
             other => {
-                if let Some(v) = other {
-                    log(format!("Upgrading SinoRAG {v} → {EXPECTED_SINORAG_VERSION}."));
+                match other {
+                    Some(v) if v == EXPECTED_SINORAG_VERSION => {
+                        log(format!("Replacing SinoRAG {v} with this installer's build of it."))
+                    }
+                    Some(v) => log(format!("Upgrading SinoRAG {v} → {EXPECTED_SINORAG_VERSION}.")),
+                    None => {}
                 }
                 step("Installing SinoRAG", 0.02);
                 extract_payload(&request.install_path)?;
+                record_payload_id(&request.install_path, &payload)?;
                 match installed_sinorag_version(&exe_path) {
                     Some(v) if v == EXPECTED_SINORAG_VERSION => log(format!("Installed {}", exe_path.display())),
                     // build.rs refuses such a payload; this is for a build that skipped the check.
@@ -970,6 +1036,10 @@ mod app {
         create_shortcuts(&request, &exe_path, &icon_path, &log)?;
         step("Registering uninstaller", 0.05);
         write_uninstall_entry(&request.install_path, EXPECTED_SINORAG_VERSION);
+        if !request.mcp_clients.is_empty() {
+            step("Connecting AI apps", 0.055);
+            connect_ai_apps(&request.mcp_clients, &exe_path, &log);
+        }
 
         // ── Intake + index rebuild ──────────────────────────────────────────
         let queued_pdf = request.files.iter().any(|f| DocKind::from_path(f) == Some(DocKind::Pdf));
@@ -1015,6 +1085,35 @@ mod app {
         }
         step("Finished", 1.0);
         Ok(summary)
+    }
+
+    /// Add `sinorag.exe mcp` to each AI app's MCP config. A failure is logged
+    /// and does not stop the run: the README says how to add it by hand.
+    fn connect_ai_apps(clients: &[McpClient], exe_path: &Path, log: &dyn Fn(String)) {
+        let mut connected = 0usize;
+        for outcome in register_mcp(clients, exe_path) {
+            match outcome.result {
+                Ok(change) => {
+                    connected += 1;
+                    let what = match change {
+                        Change::Added => "added",
+                        Change::Updated => "updated",
+                        _ => "already set up",
+                    };
+                    log(format!(
+                        "{}: MCP server \"{SERVER_NAME}\" {what} ({}).",
+                        outcome.client,
+                        outcome.config.display()
+                    ));
+                }
+                Err(e) => log(format!("Warning: {} was not connected: {e}", outcome.client)),
+            }
+        }
+        if connected > 0 {
+            log("Restart those apps to pick up the server. While one of them is running it keeps \
+                 SinoRAG open, so quit it before adding more documents."
+                .to_string());
+        }
     }
 
     fn extract_payload(install_path: &Path) -> Result<()> {

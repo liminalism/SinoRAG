@@ -29,6 +29,8 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = "0.4"
 sinorag = { path = "../.." }
+# Codex keeps its MCP servers in TOML; edit it without losing comments or layout.
+toml_edit = "0.22"
 winsafe = { version = "0.0.27", features = ["gui", "shell"] }
 
 # Lege PDF pipeline: native text layer with conservative trust checks, falling
@@ -51,6 +53,7 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [build-dependencies]
+embed-resource = "3"
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
