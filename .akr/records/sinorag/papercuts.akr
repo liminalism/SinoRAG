@@ -1,6 +1,40 @@
 akr 0.1
 project sinorag
 
+record sinorag.papercut.a-full-cargo-test-run-failed-vector-index-tests/1 : papercut {
+    title "A full `cargo test` run failed…"
+    state verified
+    statement """
+        A full `cargo test` run failed vector_index::tests::build_open_and_search_roundtrip once (expected doc 1 as nearest neighbour of [0.8, 0.2] among three points), then passed on six reruns and the next full run with no change to src/vector_index. Guess: HNSW level assignment is randomly seeded, so a three-point index can occasionally miss the true nearest; a fixed seed in the test, or asserting on the top two, would make it stable.
+        """
+    observed_at git:ffd166fa97b73eeb40f517036f18cc95af7d96b5
+    author "claude"
+    created_at 2026-11-06
+}
+
+record sinorag.papercut.patching-rust-sources-from-git-bash-on-windows/1 : papercut {
+    title "Patching Rust sources from Git Bash on Windows bit twice: a Python…"
+    state verified
+    statement """
+        Patching Rust sources from Git Bash on Windows bit twice: a Python script fed through a heredoc lost the backslash of Rust string line-continuations, leaving runs of spaces inside two user-facing messages that still compiled and were only seen in a live MCP call; and `sed -i` rewrote gui-installer/sinorag-installer-pdf-intake/src/main.rs from CRLF to LF. The intake crate mixes CRLF and LF files in the working tree (the index is LF throughout). A .gitattributes with `* text=auto eol=lf`, or editing only through the Edit tool, would avoid both.
+        """
+    observed_at git:ffd166fa97b73eeb40f517036f18cc95af7d96b5
+    author "claude"
+    created_at 2026-11-06
+}
+
+record sinorag.papercut.three-consecutive-knowledge-revise-knowledge/1 : papercut {
+    title "Three consecutive knowledge.revise / knowledge.propose writes each…"
+    state verified
+    statement """
+        Three consecutive knowledge.revise / knowledge.propose writes each returned the note "the ledger still has N diagnostic(s) this write did not introduce (AKR-P003)" with N = 73, then 42, then 20, and a fourth write (revising a proposed decision in place) returned lock_stale false with the same 20. Nothing in the response says what the diagnostics are or why the count moves between writes that touch unrelated records, so it reads as either an alarm or noise; naming the top diagnostic code, or saying the count is of stale-lock findings that `akr build` clears, would settle it.
+        """
+    observed_at git:ffd166fa97b73eeb40f517036f18cc95af7d96b5
+    about "akr"
+    author "claude"
+    created_at 2026-11-06
+}
+
 record sinorag.papercut.tool-pdf-text-lege-pdf-agent-text-pages-file/1 : papercut {
     title "tool=pdf_text (lege_pdf_agent::text_pages); file=lizard2002.pdf…"
     state verified

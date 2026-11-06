@@ -1,0 +1,5 @@
+# AKR reads and writes its ledger with LF line endings and rejects carriage
+# returns (AKR-P003). Without this, a Windows checkout with core.autocrlf=true
+# converts these files to CRLF and `akr build` fails.
+/.akr/** text eol=lf
+/docs/generated/** text eol=lf

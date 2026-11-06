@@ -5,7 +5,7 @@ build {
     tool "akr 0.6.2"
     grammar "0.1"
     vocabulary "0.2"
-    source_graph "sha256:723c1e66d949c0017c2064835e2553199fff451806c42d046055ca7c80482c4c"
+    source_graph "sha256:bb8f3ffe23663362184871f24012352520425b35c1496fbd568db673df235cef"
 }
 
 source ".akr/project.akr" {
@@ -14,23 +14,35 @@ source ".akr/project.akr" {
 }
 
 source ".akr/records/sinorag/decisions.akr" {
-    hash "sha256:9b53eb396d2739a73d8aa4ec382a110fcbd906e4e124e2290e4216c34d48d93d"
-    records 2
+    hash "sha256:d030073921f508cde56bb3b5a1bce93654b89d3eb6e2f7ebf7050befc9c6f010"
+    records 4
 }
 
 source ".akr/records/sinorag/evidence.akr" {
-    hash "sha256:06f40b05510d60128c27d956aba840a0f415bb0bc8f029fd24814d7effd0ce94"
-    records 2
+    hash "sha256:a4ccd672da086b2e117e5dc0c91f3d8423ea4157156298d581f7525503704bf2"
+    records 3
 }
 
 source ".akr/records/sinorag/observations.akr" {
-    hash "sha256:2c8e0ba6807efd7757faa79f6150b7871766358e0abb4bec8a6fc6578c787f6c"
-    records 2
+    hash "sha256:1e4c60ba44b0ab67d42edeabe4f7524a68b93f2f77b9e94c921c9a7bc9956403"
+    records 3
 }
 
 source ".akr/records/sinorag/papercuts.akr" {
-    hash "sha256:2802f34623bd34c18f757c45856d178513fdf301a03ecb0da83bb0fe35932673"
-    records 1
+    hash "sha256:215d51085b222c2b792a92dc1987abe200300dc7387f0d6159962c3dbd96f0a3"
+    records 4
+}
+
+resolution @sinorag.evidence.mcp-surface-refinement-run/1 {
+    slot derived_from
+    to @sinorag.mcp.client-facing-surface/1
+    hash "sha256:f6212c994ffb13e66092fdf925f7ef43c87e108614089c148fa7ac6ed028ca8d"
+}
+
+resolution @sinorag.intake.document-intake-gui/1 {
+    slot supported_by
+    to @sinorag.evidence.mcp-surface-refinement-run/1
+    hash "sha256:d6665b4e7a674a8cf104a3be23687fc2a3a03f4398eb4966cc7695c7eba67786"
 }
 
 seal @sinorag.evidence.cbeta-regression-word-layout/1 {
@@ -43,14 +55,39 @@ seal @sinorag.evidence.english-intake-end-to-end/1 {
     hash "sha256:094f24443597876ec38ea04eb54fe7deace0788564d7f1a973069fb85f7813b9"
 }
 
+seal @sinorag.evidence.mcp-surface-refinement-run/1 {
+    state verified
+    hash "sha256:d6665b4e7a674a8cf104a3be23687fc2a3a03f4398eb4966cc7695c7eba67786"
+}
+
 seal @sinorag.intake.shared-payload-stale/1 {
     state superseded
     hash "sha256:2a13d496d2fc8b296db08b2753273d85ee8fe503e8871319ffee9f7eaf948fd9"
 }
 
 seal @sinorag.intake.shared-payload-stale/2 {
+    state superseded
+    hash "sha256:97dfdd6508a27ba7ada2da52217ecdacd8583e998189a9adb0da7b463a300c7f"
+}
+
+seal @sinorag.intake.shared-payload-stale/3 {
     state verified
-    hash "sha256:71296bcf0037d46c8d8a2e73d7fb6a343b93bf8f47d818fb1850fbfa94b5a6cf"
+    hash "sha256:00a870e6dfe9aa6bddd67672d89e556139b56f46a52271cbc8e8ca4cc847d834"
+}
+
+seal @sinorag.papercut.a-full-cargo-test-run-failed-vector-index-tests/1 {
+    state verified
+    hash "sha256:42179ecde26a2adfd4ec1da3e220f3c27448635c2e5398e2fffd52204df64b3a"
+}
+
+seal @sinorag.papercut.patching-rust-sources-from-git-bash-on-windows/1 {
+    state verified
+    hash "sha256:eed346444a00e50b4addd0f336551f9af47fe8090c7122cf9f7b80973cb7a168"
+}
+
+seal @sinorag.papercut.three-consecutive-knowledge-revise-knowledge/1 {
+    state verified
+    hash "sha256:189f3bd87585c72d9bf90a8ee0be4fe349946104fddcfcf1645fd8699df9d27a"
 }
 
 seal @sinorag.papercut.tool-pdf-text-lege-pdf-agent-text-pages-file/1 {
