@@ -1,0 +1,4 @@
+/target/
+Cargo.lock
+# Left behind only when make-payload.ps1 is interrupted.
+/sinorag.7z.partial

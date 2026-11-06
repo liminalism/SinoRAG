@@ -1,0 +1,63 @@
+[package]
+name = "sinorag-intake"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+description = "SinoRAG document intake: installs SinoRAG and indexes local PDF/HTML/text files"
+
+# Standalone package (own Cargo.lock), like the sibling winsafe installer.
+[workspace]
+
+[[bin]]
+name = "sinorag-intake"
+path = "src/main.rs"
+
+[[bin]]
+name = "sinorag-intake-uninstaller"
+path = "src/uninstaller.rs"
+
+[dependencies]
+anyhow = "1"
+# Charset guess for HTML / text files that are neither UTF-8 nor declared.
+chardetng = "1"
+encoding_rs = "0.8"
+flume = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sevenz-rust = "0.6"
+sha2 = "0.10"
+hex = "0.4"
+chrono = "0.4"
+sinorag = { path = "../.." }
+winsafe = { version = "0.0.27", features = ["gui", "shell"] }
+
+# Lege PDF pipeline: native text layer with conservative trust checks, falling
+# back to OCR (Windows.Media.Ocr on Windows) for scanned or untrustworthy pages.
+# Sibling checkout: D:\projects\Lege-ecosystem next to D:\projects\SinoRAG.
+lege-pdf-agent = { path = "../../../Lege-ecosystem/lege-pdf/agent" }
+pdf-text = { path = "../../../Lege-ecosystem/lege-pdf/render/crates/pdf-text" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Globalization",
+    "Media_Ocr",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+ico = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# The Lege renderer contains per-page panics behind catch_unwind; abort would
+# turn one malformed PDF into a crashed intake run.
+panic = "unwind"
