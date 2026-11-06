@@ -8,6 +8,7 @@ Cargo.lock.bak
 SinoRAG.zip
 cargo-checker.exe
 /gui-installer/sinorag-installer/*.exe
+/gui-installer/sinorag-installer/sinorag.7z
 /terebess_zen_text_images/
 /terebess_zen_urls/
 /.codegraph/
