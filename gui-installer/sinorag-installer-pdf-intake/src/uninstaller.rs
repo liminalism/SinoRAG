@@ -6,7 +6,7 @@ fn main() {
 #[cfg(target_os = "windows")]
 fn main() {
     use sinorag_intake::win_utils::{
-        classify_install_folder, delete_uninstall_entry, desktop_shortcut_path,
+        classify_install_folder, delete_uninstall_entry, desktop_shortcut_path, foreign_entries,
         read_install_location, sinorag_is_running, start_menu_intake_shortcut_path,
         start_menu_shortcut_path, try_single_instance, InstallFolder,
     };
@@ -77,6 +77,20 @@ fn main() {
         println!("This removes SinoRAG, the indexed document text and all indexes.");
         println!("EVERYTHING in that folder is deleted.");
         println!("Your original PDF, HTML and text files are not touched.");
+        // Anything else there was saved by the user or by a chat session.
+        let others = foreign_entries(&install_dir);
+        if !others.is_empty() {
+            println!();
+            println!("The folder also holds these, which SinoRAG did not put there. They are deleted too;");
+            println!("move them out first if you want to keep them:");
+            for name in others.iter().take(15) {
+                println!("  {name}");
+            }
+            if others.len() > 15 {
+                println!("  ... and {} more", others.len() - 15);
+            }
+            println!();
+        }
     } else {
         println!("That folder is already gone. This removes the shortcuts and the uninstall entry.");
     }

@@ -214,6 +214,29 @@ const OWN_ENTRIES: &[&str] = &[
     "data",
 ];
 
+/// What SinoRAG itself adds to the folder once it is used: the OpenCode
+/// project files `sinorag agent` writes, and the tool-call log.
+const RUNTIME_ENTRIES: &[&str] = &[".opencode", "agents.md", ".sinorag"];
+
+/// Entries in the install folder that neither the intake nor SinoRAG put
+/// there: notes or reports a chat session saved, say. The uninstaller
+/// deletes the folder whole, so it names these first.
+pub fn foreign_entries(dir: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| {
+                    let lower = name.to_ascii_lowercase();
+                    !OWN_ENTRIES.contains(&lower.as_str()) && !RUNTIME_ENTRIES.contains(&lower.as_str())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
 /// The install folder is the intake's alone: every run rebuilds all the
 /// indexes in it, and the uninstaller deletes it whole. So it must not be a
 /// folder with someone's files in it, nor a CBETA install.
@@ -369,8 +392,19 @@ mod tests {
         // A finished one, with whatever SinoRAG wrote next to it since.
         fs::create_dir_all(dir.join("intake")).unwrap();
         fs::create_dir_all(dir.join(".opencode")).unwrap();
+        fs::create_dir_all(dir.join(".sinorag")).unwrap();
+        fs::write(dir.join("AGENTS.md"), b"x").unwrap();
         fs::create_dir_all(dir.join("data/passages.parquet/source_corpus=documents")).unwrap();
         assert_eq!(classify_install_folder(&dir), InstallFolder::Installed);
+        assert!(foreign_entries(&dir).is_empty(), "{:?}", foreign_entries(&dir));
+
+        // What a chat session saved there is the user's, and is named as such.
+        fs::write(dir.join("summary.md"), b"x").unwrap();
+        fs::create_dir_all(dir.join("Reports")).unwrap();
+        assert_eq!(foreign_entries(&dir), vec!["Reports".to_string(), "summary.md".to_string()]);
+        assert_eq!(classify_install_folder(&dir), InstallFolder::Installed);
+        fs::remove_file(dir.join("summary.md")).unwrap();
+        fs::remove_dir(dir.join("Reports")).unwrap();
 
         // A CBETA install is not the intake's to rebuild or remove.
         fs::create_dir_all(dir.join("data/passages.parquet/source_corpus=cbeta")).unwrap();

@@ -13,7 +13,7 @@
 #[cfg(target_os = "windows")]
 mod app {
     use anyhow::{anyhow, Context, Result};
-    use sinorag_intake::corpus::CorpusStore;
+    use sinorag_intake::corpus::{installed_payload_id, payload_id, record_payload_id, CorpusStore};
     use sinorag_intake::extract::{DocKind, ExtractOptions};
     use sinorag_intake::pipeline::{intake_root, run_intake, IntakeEvent, IntakeOptions, IntakeSummary};
     use sinorag_intake::win_utils::{
@@ -786,9 +786,26 @@ mod app {
                     }
                     self.set_step(&status)?;
                     if summary.rebuilt {
+                        let exe = PathBuf::from(self.path_edit.hwnd().GetWindowText()?.trim()).join("sinorag.exe");
+                        // Name a way in that this run actually created.
+                        let opener = if self.start_menu_cb.is_checked() {
+                            "open \"SinoRAG Documents\" from the Start Menu".to_string()
+                        } else if self.desktop_cb.is_checked() {
+                            "open the \"SinoRAG Documents\" shortcut on the desktop".to_string()
+                        } else {
+                            format!("run \"{}\" agent", exe.display())
+                        };
+                        self.append_log(&format!(
+                            "To ask questions: {opener}. It starts OpenCode with these documents connected."
+                        ))?;
+                        self.append_log(&format!(
+                            "To use another MCP client (Claude Desktop, Claude Code, Cursor, ...): add a \
+                             local (stdio) server whose command is \"{}\" with the single argument: mcp",
+                            exe.display()
+                        ))?;
                         self.append_log(
-                            "Ask questions with the \"SinoRAG Documents\" shortcut (OpenCode), or point any \
-                             MCP client at `sinorag.exe mcp` run from the install folder.",
+                            "Close those before adding more documents here: a running session keeps the \
+                             indexes open.",
                         )?;
                     }
                     self.set_controls_enabled(true)?;
@@ -936,14 +953,25 @@ mod app {
 
         // ── Install / upgrade SinoRAG itself ────────────────────────────────
         step("Checking SinoRAG", 0.01);
+        // The same version is not the same program: compare the payload this
+        // installer carries with the one the folder was last given.
+        let payload = payload_id(PAYLOAD_7Z);
+        let same_payload = installed_payload_id(&request.install_path).as_deref() == Some(payload.as_str());
         match installed_sinorag_version(&exe_path) {
-            Some(v) if v == EXPECTED_SINORAG_VERSION => log(format!("SinoRAG {v} is already installed.")),
+            Some(v) if v == EXPECTED_SINORAG_VERSION && same_payload => {
+                log(format!("SinoRAG {v} is already installed."))
+            }
             other => {
-                if let Some(v) = other {
-                    log(format!("Upgrading SinoRAG {v} → {EXPECTED_SINORAG_VERSION}."));
+                match other {
+                    Some(v) if v == EXPECTED_SINORAG_VERSION => {
+                        log(format!("Replacing SinoRAG {v} with this installer's build of it."))
+                    }
+                    Some(v) => log(format!("Upgrading SinoRAG {v} → {EXPECTED_SINORAG_VERSION}.")),
+                    None => {}
                 }
                 step("Installing SinoRAG", 0.02);
                 extract_payload(&request.install_path)?;
+                record_payload_id(&request.install_path, &payload)?;
                 match installed_sinorag_version(&exe_path) {
                     Some(v) if v == EXPECTED_SINORAG_VERSION => log(format!("Installed {}", exe_path.display())),
                     // build.rs refuses such a payload; this is for a build that skipped the check.
