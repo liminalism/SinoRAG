@@ -1,0 +1,28 @@
+akr 0.1
+project sinorag
+
+record sinorag.evidence.cbeta-regression-word-layout/1 : evidence {
+    title "CBETA indexes and tool outputs unchanged by word-layout normalization"
+    state verified
+    result pass
+    method command
+    observed_at git:576bcec1b067aeb270b8c021b1f82a8ca1991ce8
+    command "sinorag init on a CBETA slice (cbeta-pack.7z part-000000) with the HEAD binary (git worktree) and the working-tree binary; sha256 of data/derived/*; then 39 tool-call comparisons (search/evidence-search for 12 CJK+Latin phrases, batch-evidence-search, similar, frontier, source-investigate, citation-verify x2, pair-appearance, pair-profile, collocation-search, canonical-source, heading-search, phrase-index-search, trace-term-usage, first-attestation, absence-check) with timing fields removed"
+    summary """
+        doc_table.bin, catalog.index, phrase.index and tfidf.index byte-identical (TF-IDF vocab 14767 both); 39/39 tool outputs identical, all ok=true. Working tree was uncommitted on top of HEAD 576bcec.
+        """
+    author "dk"
+}
+
+record sinorag.evidence.english-intake-end-to-end/1 : evidence {
+    title "English document intake: search, similarity and MCP verified end to end"
+    state verified
+    result pass
+    method command
+    observed_at git:576bcec1b067aeb270b8c021b1f82a8ca1991ce8
+    command "cargo run --example intake_cli (sinorag-installer-pdf-intake) on 10 files (text-layer PDF, scanned PDF, garbled-layer PDF, HTML, Chinese .txt, English .txt); sinorag tool-call search/evidence-search/similar from the install root; sinorag mcp initialize + tools/call over stdio; cargo test --lib in both crates"
+    summary """
+        Search is case-insensitive and whole-word ("COOLANT Pump" hits; "pum" no hits; 3-letter "NEC" works via scan fallback); Chinese search unchanged; similar ranks pump docs with pump docs and heron docs with heron docs on shared words; MCP instructions include the word-corpus section; scanned page OCR'd verbatim; re-runs skip known files by hash. sinorag lib 81 tests, intake 9 tests pass.
+        """
+    author "dk"
+}

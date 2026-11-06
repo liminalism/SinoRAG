@@ -13,3 +13,8 @@ cargo-checker.exe
 /terebess_zen_urls/
 /.codegraph/
 /vendor/
+
+# AKR: a rebuildable cache and disposable agent notes.
+.akr/cache/
+.agent/scratch/
+.agent/handoffs/

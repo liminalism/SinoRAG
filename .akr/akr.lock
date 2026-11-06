@@ -1,0 +1,59 @@
+akr-lock 0.1
+project sinorag
+
+build {
+    tool "akr 0.6.2"
+    grammar "0.1"
+    vocabulary "0.2"
+    source_graph "sha256:723c1e66d949c0017c2064835e2553199fff451806c42d046055ca7c80482c4c"
+}
+
+source ".akr/project.akr" {
+    hash "sha256:dc77390c256d9bd88fd3500b44a609fad52d885fdc64560207f28a2290984b02"
+    records 0
+}
+
+source ".akr/records/sinorag/decisions.akr" {
+    hash "sha256:9b53eb396d2739a73d8aa4ec382a110fcbd906e4e124e2290e4216c34d48d93d"
+    records 2
+}
+
+source ".akr/records/sinorag/evidence.akr" {
+    hash "sha256:06f40b05510d60128c27d956aba840a0f415bb0bc8f029fd24814d7effd0ce94"
+    records 2
+}
+
+source ".akr/records/sinorag/observations.akr" {
+    hash "sha256:2c8e0ba6807efd7757faa79f6150b7871766358e0abb4bec8a6fc6578c787f6c"
+    records 2
+}
+
+source ".akr/records/sinorag/papercuts.akr" {
+    hash "sha256:2802f34623bd34c18f757c45856d178513fdf301a03ecb0da83bb0fe35932673"
+    records 1
+}
+
+seal @sinorag.evidence.cbeta-regression-word-layout/1 {
+    state verified
+    hash "sha256:b02273a89199dd70b1d47fc78aabe66a6c1b3d080d0d2c68db3f676da128a3aa"
+}
+
+seal @sinorag.evidence.english-intake-end-to-end/1 {
+    state verified
+    hash "sha256:094f24443597876ec38ea04eb54fe7deace0788564d7f1a973069fb85f7813b9"
+}
+
+seal @sinorag.intake.shared-payload-stale/1 {
+    state superseded
+    hash "sha256:2a13d496d2fc8b296db08b2753273d85ee8fe503e8871319ffee9f7eaf948fd9"
+}
+
+seal @sinorag.intake.shared-payload-stale/2 {
+    state verified
+    hash "sha256:71296bcf0037d46c8d8a2e73d7fb6a343b93bf8f47d818fb1850fbfa94b5a6cf"
+}
+
+seal @sinorag.papercut.tool-pdf-text-lege-pdf-agent-text-pages-file/1 {
+    state verified
+    hash "sha256:97f9d83f5074890f9ed2de4e314d3e342c1ccf0125ce13a56c487d4206a9f30e"
+}
