@@ -355,6 +355,32 @@ pub fn data_root_has_word_corpus(passages_parquet: &std::path::Path) -> bool {
         .is_some_and(|m| m.values().any(|v| v == "words"))
 }
 
+/// True when the data root holds word-layout corpora and nothing else: a
+/// collection of someone's documents, with no CBETA beside it.
+pub fn data_root_is_word_only(passages_parquet: &std::path::Path) -> bool {
+    let profiles: std::collections::BTreeMap<String, String> = passages_parquet
+        .parent()
+        .map(|root| root.join(TEXT_PROFILES_FILE))
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let Ok(partitions) = std::fs::read_dir(passages_parquet) else {
+        return false;
+    };
+    let mut corpora = 0usize;
+    for entry in partitions.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(corpus) = name.strip_prefix("source_corpus=") else {
+            continue;
+        };
+        if profiles.get(corpus).map(String::as_str) != Some("words") {
+            return false;
+        }
+        corpora += 1;
+    }
+    corpora > 0
+}
+
 /// `true` iff every byte in `block` is ASCII non-whitespace, non-punctuation,
 /// non-symbol (the "keep" set under the existing `normalize_zh` policy).
 ///
@@ -414,6 +440,22 @@ fn is_strippable_category(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_data_root_is_word_only_when_every_corpus_is() {
+        let root = tempfile::tempdir().unwrap();
+        let parquet = root.path().join("passages.parquet");
+        assert!(!data_root_is_word_only(&parquet), "no corpus at all");
+
+        std::fs::create_dir_all(parquet.join("source_corpus=documents")).unwrap();
+        assert!(!data_root_is_word_only(&parquet), "profile not recorded");
+        record_text_profile(&parquet, "documents", true).unwrap();
+        assert!(data_root_is_word_only(&parquet));
+
+        std::fs::create_dir_all(parquet.join("source_corpus=cbeta")).unwrap();
+        assert!(!data_root_is_word_only(&parquet), "a CJK corpus beside it");
+        assert!(data_root_has_word_corpus(&parquet));
+    }
 
     #[test]
     fn normalize_strips_punct_and_ws() {

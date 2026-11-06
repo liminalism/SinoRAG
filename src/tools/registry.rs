@@ -71,10 +71,123 @@ pub async fn call_tool(engine: &ToolEngine, name: &str, args: Value) -> Result<V
         .ok_or_else(|| ToolError::unknown_tool(name).into_anyhow())?;
 
     enforce_safety(engine, &def.spec)?;
+    check_arguments(&def.spec, &args)?;
 
-    let mut result = (def.call)(engine, args).await?;
+    let mut result = (def.call)(engine, args)
+        .await
+        .map_err(|err| argument_type_error(&def.spec, err))?;
     crate::dict::annotate_response(&mut result).await;
     Ok(result)
+}
+
+/// Argument names a tool accepts through a serde alias, which its schema
+/// does not list: `(tool, alias, field)`.
+const ARGUMENT_ALIASES: &[(&str, &str, &str)] = &[("passage", "passage_id", "id")];
+
+fn schema_names(spec: &ToolSpec, key: &str) -> Vec<String> {
+    match spec.input_schema.get(key) {
+        Some(Value::Object(properties)) => properties.keys().cloned().collect(),
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(|name| name.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn invalid_arguments(spec: &ToolSpec, problems: Vec<String>) -> anyhow::Error {
+    ToolError::InvalidArguments {
+        tool: spec.name.to_string(),
+        problems,
+        accepted: schema_names(spec, "properties"),
+        required: schema_names(spec, "required"),
+    }
+    .into_anyhow()
+}
+
+/// Refuse a call whose arguments cannot mean what the caller intended: a
+/// required argument that is missing or blank, or a name the tool does not
+/// have. Serde reports the first as an internal error and silently drops the
+/// second, so a misspelled filter (`work_id` for `source_work_id`) returns
+/// unfiltered results that look filtered.
+fn check_arguments(spec: &ToolSpec, args: &Value) -> Result<()> {
+    let empty = serde_json::Map::new();
+    let given = match args {
+        Value::Object(map) => map,
+        Value::Null => &empty,
+        _ => {
+            return Err(invalid_arguments(
+                spec,
+                vec!["the arguments must be a JSON object".to_string()],
+            ))
+        }
+    };
+    let accepted = schema_names(spec, "properties");
+    let alias_of = |name: &str| {
+        ARGUMENT_ALIASES
+            .iter()
+            .find(|(tool, alias, _)| *tool == spec.name && *alias == name)
+            .map(|(_, _, field)| *field)
+    };
+
+    let mut problems = Vec::new();
+    for name in schema_names(spec, "required") {
+        let value = given.get(&name).or_else(|| {
+            given
+                .iter()
+                .find(|(key, _)| alias_of(key.as_str()) == Some(name.as_str()))
+                .map(|(_, value)| value)
+        });
+        match value {
+            None | Some(Value::Null) => {
+                problems.push(format!("missing required argument `{name}`"))
+            }
+            Some(Value::String(text)) if text.trim().is_empty() => {
+                problems.push(format!("argument `{name}` is empty"))
+            }
+            _ => {}
+        }
+    }
+    for name in given.keys() {
+        if accepted.contains(name) || alias_of(name).is_some() {
+            continue;
+        }
+        // `work_id` for `source_work_id`, `source_work_id` for `scope_work_id`.
+        let parts: Vec<&str> = name.split('_').collect();
+        let near: Vec<&str> = accepted
+            .iter()
+            .map(String::as_str)
+            .filter(|known| {
+                known.contains(name.as_str())
+                    || name.contains(*known)
+                    || known.split('_').filter(|part| parts.contains(part)).count() >= 2
+            })
+            .collect();
+        problems.push(if near.is_empty() {
+            format!("unknown argument `{name}`")
+        } else {
+            format!(
+                "unknown argument `{name}` (did you mean `{}`?)",
+                near.join("` or `")
+            )
+        });
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid_arguments(spec, problems))
+    }
+}
+
+/// A value of the wrong type surfaces from the tool's own deserialization;
+/// report it as the caller's error it is.
+fn argument_type_error(spec: &ToolSpec, err: anyhow::Error) -> anyhow::Error {
+    match err.downcast_ref::<serde_json::Error>() {
+        Some(parse) if parse.classify() == serde_json::error::Category::Data => {
+            invalid_arguments(spec, vec![parse.to_string()])
+        }
+        _ => err,
+    }
 }
 
 /// Call a tool with envelope response
@@ -1514,6 +1627,100 @@ pub fn tool_defs() -> Vec<ToolDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spec(name: &str) -> ToolSpec {
+        tool_defs()
+            .into_iter()
+            .find(|def| def.spec.name == name)
+            .map(|def| def.spec)
+            .expect("tool exists")
+    }
+
+    fn problems(tool: &str, args: Value) -> Vec<String> {
+        match check_arguments(&spec(tool), &args) {
+            Ok(()) => Vec::new(),
+            Err(err) => match err.downcast_ref::<ToolError>() {
+                Some(ToolError::InvalidArguments { problems, .. }) => problems.clone(),
+                other => panic!("expected InvalidArguments, got {other:?}"),
+            },
+        }
+    }
+
+    #[test]
+    fn arguments_that_fit_the_schema_pass() {
+        assert!(problems("search", serde_json::json!({ "phrase": "coolant pump" })).is_empty());
+        // An optional argument sent as null is the same as leaving it out.
+        assert!(problems(
+            "search",
+            serde_json::json!({ "phrase": "x", "source_work_id": null, "limit": 3 })
+        )
+        .is_empty());
+        assert!(problems("status", Value::Null).is_empty());
+        // `passage` takes `passage_id` for `id` through a serde alias.
+        assert!(problems("passage", serde_json::json!({ "passage_id": "doc-1#p0001.01" })).is_empty());
+    }
+
+    #[test]
+    fn a_misnamed_argument_is_refused_with_the_name_to_use() {
+        // Both cases are from the tool log: `pattern` for `phrase`, and a
+        // work filter under the name another tool uses for it.
+        let found = problems("search", serde_json::json!({ "pattern": "入宋傳法" }));
+        assert_eq!(
+            found,
+            vec![
+                "missing required argument `phrase`".to_string(),
+                "unknown argument `pattern`".to_string()
+            ]
+        );
+        let found = problems(
+            "search",
+            serde_json::json!({ "phrase": "x", "work_id": "doc-1" }),
+        );
+        assert_eq!(
+            found,
+            vec!["unknown argument `work_id` (did you mean `source_work_id`?)".to_string()]
+        );
+        let found = problems(
+            "absence-check",
+            serde_json::json!({ "phrase": "x", "source_work_id": "doc-1" }),
+        );
+        assert_eq!(
+            found,
+            vec!["unknown argument `source_work_id` (did you mean `scope_work_id`?)".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_blank_required_argument_is_refused() {
+        assert_eq!(
+            problems("search", serde_json::json!({ "phrase": "  " })),
+            vec!["argument `phrase` is empty".to_string()]
+        );
+        assert_eq!(
+            problems("search", serde_json::json!(["phrase"])),
+            vec!["the arguments must be a JSON object".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_wrong_type_is_the_callers_error_and_names_the_arguments() {
+        let parse = serde_json::from_value::<SearchRequest>(
+            serde_json::json!({ "phrase": "x", "origin": ["a"] }),
+        )
+        .unwrap_err();
+        let err = argument_type_error(&spec("search"), anyhow::Error::from(parse));
+        let body = classify_tool_error(&err);
+        assert_eq!(body.code, "invalid_args");
+        assert!(body.message.contains("invalid type: sequence"), "{}", body.message);
+        assert!(body
+            .suggested_command
+            .unwrap()
+            .contains("(required: phrase)"));
+
+        // Anything else passes through untouched.
+        let other = argument_type_error(&spec("search"), anyhow::anyhow!("disk on fire"));
+        assert_eq!(classify_tool_error(&other).code, "internal_error");
+    }
 
     /// Guard the public surface: the default manifest should stay compact and
     /// debug-only tools should remain hidden unless explicitly requested.

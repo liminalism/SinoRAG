@@ -204,7 +204,9 @@ fn is_stopword(word: &str) -> bool {
     STOPWORDS.binary_search(&word).is_ok()
 }
 
-fn keep_word(token: &str) -> bool {
+/// Whether a word-layout token is a content word: not a stopword, a stray
+/// letter or a short number.
+pub(crate) fn keep_word(token: &str) -> bool {
     if token.chars().any(crate::normalize::is_dense_char) {
         return false;
     }

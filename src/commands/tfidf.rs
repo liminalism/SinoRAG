@@ -177,9 +177,12 @@ pub async fn similar_passages_with_index(
     min_shared_phrase_len: usize,
     doc_table: &DocumentTable,
 ) -> Result<Vec<Value>> {
-    let seed_doc_id = doc_table
-        .doc_id(seed)
-        .ok_or_else(|| anyhow!("Seed passage not found in DocumentTable: {seed}"))?;
+    let seed_doc_id = doc_table.doc_id(seed).ok_or_else(|| {
+        crate::tools::errors::ToolError::PassageNotFound {
+            passage_id: seed.to_string(),
+        }
+        .into_anyhow()
+    })?;
     let ranked = index.similar(seed_doc_id, limit)?;
     if ranked.is_empty() {
         return Ok(Vec::new());

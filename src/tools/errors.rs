@@ -53,6 +53,16 @@ pub enum ToolError {
     #[error("invalid args: {0}")]
     InvalidArgs(String),
 
+    /// The arguments do not fit the tool's input schema. `problems` names
+    /// each one; `accepted` and `required` are the tool's argument names.
+    #[error("{tool}: {}", .problems.join("; "))]
+    InvalidArguments {
+        tool: String,
+        problems: Vec<String>,
+        accepted: Vec<String>,
+        required: Vec<String>,
+    },
+
     #[error("{tool} expects a passage_id, but got {provided}")]
     InvalidPassageId {
         tool: String,
@@ -83,6 +93,39 @@ impl ToolError {
     }
 }
 
+/// What the user has to do before there is anything to search. A model
+/// cannot build the corpus from inside a session, so this is advice to pass
+/// on, and it names the route this install actually has.
+fn how_to_build_the_corpus() -> String {
+    let from_document_intake = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("sinorag-intake.exe")))
+        .is_some_and(|intake| intake.is_file());
+    if from_document_intake {
+        "Tell the user that no documents are ready to search yet. They need to close this \
+         session, open \"Add documents to SinoRAG\" from the Start Menu, add their files and \
+         let it finish, then start again. Retrying the call will not help."
+            .to_string()
+    } else {
+        "Tell the user the corpus is not built; retrying the call will not help. It is \
+         built from a terminal with `sinorag init` or `sinorag ingest`."
+            .to_string()
+    }
+}
+
+/// One of the derived indexes is missing while the corpus itself exists.
+fn missing_index(code: &str, kind: &str, path: &std::path::Path) -> ToolErrorBody {
+    ToolErrorBody {
+        code: code.to_string(),
+        message: format!(
+            "The {kind} index has not been built: nothing at {}",
+            path.display()
+        ),
+        suggested_command: Some(how_to_build_the_corpus()),
+        details: Some(serde_json::json!({ "path": path.display().to_string() })),
+    }
+}
+
 /// Classify an anyhow error into a structured ToolErrorBody
 pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
     let msg = err.to_string();
@@ -94,66 +137,47 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "unknown_tool".to_string(),
                 message: format!("Unknown tool: {}", name),
                 suggested_command: Some(
-                    "Run 'sinorag tools-manifest' to see available tools".to_string(),
+                    "Call tool-docs (no arguments) for the list of tools".to_string(),
                 ),
                 details: None,
             },
-            ToolError::MissingPhraseIndex { path } => ToolErrorBody {
-                code: "missing_phrase_index".to_string(),
-                message: format!("Phrase index not found at {}", path.display()),
-                suggested_command: Some(format!(
-                    "sinorag index phrase --parquet data/passages.parquet --out {}",
-                    path.display()
-                )),
-                details: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-            ToolError::MissingTfidfIndex { path } => ToolErrorBody {
-                code: "missing_tfidf_index".to_string(),
-                message: format!("TF-IDF index not found at {}", path.display()),
-                suggested_command: Some(format!(
-                    "sinorag index tfidf --parquet data/passages.parquet --out {}",
-                    path.display()
-                )),
-                details: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
+            ToolError::MissingPhraseIndex { path } => missing_index("missing_phrase_index", "phrase", path),
+            ToolError::MissingTfidfIndex { path } => missing_index("missing_tfidf_index", "tfidf", path),
             ToolError::MissingVectorIndex { path } => ToolErrorBody {
                 code: "missing_vector_index".to_string(),
-                message: format!("Vector index not found at {}", path.display()),
-                suggested_command: Some(format!(
-                    "sinorag index vector-build --embeddings data/derived/embeddings.jsonl --model-id MODEL --out {}",
+                message: format!(
+                    "Semantic (vector) search is not built for this collection: no index at {}",
                     path.display()
-                )),
-                details: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-            ToolError::MissingCatalogIndex { path } => ToolErrorBody {
-                code: "missing_catalog_index".to_string(),
-                message: format!("Catalog index not found at {}", path.display()),
+                ),
                 suggested_command: Some(
-                    "Run 'sinorag catalog-index-build' to build the catalog index".to_string(),
+                    "Use frontier or similar for related passages instead. (Operator: \
+                     `sinorag index vector-update` builds the semantic index.)"
+                        .to_string(),
                 ),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
-            ToolError::MissingDocTable { path } => ToolErrorBody {
-                code: "missing_doc_table".to_string(),
-                message: format!("Document table not found at {}", path.display()),
-                suggested_command: Some(
-                    "Run 'sinorag doc-table-build' to build the document table".to_string(),
-                ),
-                details: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
+            ToolError::MissingCatalogIndex { path } => missing_index("missing_catalog_index", "catalog", path),
+            ToolError::MissingDocTable { path } => missing_index("missing_doc_table", "doc table", path),
             ToolError::MissingPassages { path } => ToolErrorBody {
                 code: "missing_passages".to_string(),
-                message: format!("Passages parquet not found at {}", path.display()),
-                suggested_command: Some("Run 'sinorag ingest' to build the corpus".to_string()),
+                message: format!(
+                    "Nothing has been indexed yet: there are no passages at {}",
+                    path.display()
+                ),
+                suggested_command: Some(how_to_build_the_corpus()),
                 details: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
             ToolError::ReadonlyViolation { tool } => ToolErrorBody {
                 code: "readonly_violation".to_string(),
                 message: format!(
-                    "Tool '{}' writes output but engine is in readonly mode",
+                    "Tool '{}' writes a file, and this SinoRAG session is read-only",
                     tool
                 ),
-                suggested_command: Some("Remove --readonly flag to allow writes".to_string()),
+                suggested_command: Some(
+                    "Give the content to the user in your reply instead. Output tools are \
+                     enabled by starting `sinorag mcp` or `sinorag agent` with --writable."
+                        .to_string(),
+                ),
                 details: Some(serde_json::json!({ "tool": tool })),
             },
             ToolError::AdminToolDisabled { tool } => ToolErrorBody {
@@ -188,9 +212,34 @@ pub fn classify_tool_error(err: &anyhow::Error) -> ToolErrorBody {
                 code: "invalid_args".to_string(),
                 message: format!("Invalid arguments: {}", s),
                 suggested_command: Some(
-                    "Run 'sinorag explain-tool <tool>' for usage information".to_string(),
+                    "See the tool's input schema, or call tool-docs with {\"tool\": \"<name>\"}"
+                        .to_string(),
                 ),
                 details: None,
+            },
+            ToolError::InvalidArguments {
+                tool,
+                problems,
+                accepted,
+                required,
+            } => ToolErrorBody {
+                code: "invalid_args".to_string(),
+                message: format!("Invalid arguments for {}: {}", tool, problems.join("; ")),
+                suggested_command: Some(if accepted.is_empty() {
+                    format!("{tool} takes no arguments")
+                } else if required.is_empty() {
+                    format!("{tool} accepts: {}", accepted.join(", "))
+                } else {
+                    format!(
+                        "{tool} accepts: {} (required: {})",
+                        accepted.join(", "),
+                        required.join(", ")
+                    )
+                }),
+                details: Some(serde_json::json!({
+                    "tool": tool,
+                    "problems": problems,
+                })),
             },
             ToolError::InvalidPassageId {
                 tool,
