@@ -71,6 +71,17 @@ cargo run --example intake_cli -- <root> [--ocr eng] [--no-lexical] <files or fo
 
 Ship the two exes side by side. The intake copies itself and the uninstaller into the install folder.
 
+`build.rs` draws the SinoRAG icon at every size Windows uses (16 to 256 px) and embeds it in both exes, together with version details. This needs `rc.exe` from the Windows SDK, which the Visual Studio C++ build tools install.
+
+### Release package
+
+```powershell
+.\make-release.ps1          # make-payload, cargo build --release, zip into .\dist\
+.\make-release.ps1 -SkipPayload   # reuse the current sinorag.7z
+```
+
+This writes `dist\SinoRAG-Document-Intake-<sinorag version>-windows-x64.zip`, which holds both exes and this README, and prints its SHA-256. Attach the zip to a GitHub release.
+
 ### The payload
 
 The installer embeds `sinorag.exe` as `sinorag.7z`: `./sinorag.7z` if it exists, else the one the CBETA installers share (`../sinorag-installer/sinorag.7z`). The intake writes the indexes with the `sinorag` library it links, and the installed `sinorag.exe` reads them, so **the payload must be built from the same source as the intake**. An older `sinorag.exe` does not know the `words` text profile: English phrases find nothing and fragments of words match.

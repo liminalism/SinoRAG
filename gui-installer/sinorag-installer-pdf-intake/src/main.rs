@@ -227,6 +227,8 @@ mod app {
 
             let wnd = gui::WindowMain::new(gui::WindowMainOpts {
                 title: WINDOW_TITLE,
+                // The icon build.rs embeds as resource 1.
+                class_icon: gui::Icon::Id(1),
                 size: gui::dpi(W, H),
                 style: co::WS::CAPTION | co::WS::SYSMENU | co::WS::MINIMIZEBOX,
                 ex_style: co::WS_EX::LEFT | co::WS_EX::ACCEPTFILES,
