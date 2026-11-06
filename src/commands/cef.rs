@@ -74,6 +74,17 @@ pub fn validate(input: PathBuf) -> Result<ValidationReport> {
             });
         }
 
+        if let Some(profile) = corpus.text_profile.as_deref() {
+            if !matches!(profile, "cjk" | "words") {
+                errors.push(ValidationError {
+                    file: "corpus.toml".to_string(),
+                    line: None,
+                    code: "invalid_text_profile".to_string(),
+                    message: format!("text_profile must be 'cjk' or 'words', got '{profile}'"),
+                });
+            }
+        }
+
         if corpus.snapshot_id.is_empty() {
             errors.push(ValidationError {
                 file: "corpus.toml".to_string(),
@@ -405,6 +416,12 @@ pub fn stats(input: PathBuf) -> Result<()> {
 }
 
 pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
+    ingest_blocking(input, out_parquet).map(|_| ())
+}
+
+/// Synchronous body of [`ingest`], for callers without a Tokio runtime (the
+/// Windows document-intake GUI). Returns the number of passages written.
+pub fn ingest_blocking(input: PathBuf, out_parquet: PathBuf) -> Result<usize> {
     let corpus_dir = if input.is_file() {
         input
             .parent()
@@ -460,9 +477,13 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
             .with_context(|| format!("parse {} line {}", passages_path.display(), line_no + 1))?;
         let work = work_map.get(&passage.work_id);
 
-        let text_normalized = passage
-            .text_normalized
-            .unwrap_or_else(|| normalize_zh(&passage.text));
+        let text_normalized = passage.text_normalized.unwrap_or_else(|| {
+            if corpus.uses_word_profile() {
+                crate::normalize::normalize_words(&passage.text)
+            } else {
+                normalize_zh(&passage.text)
+            }
+        });
 
         passages.push(
             ModelPassageRecord {
@@ -567,10 +588,17 @@ pub async fn ingest(input: PathBuf, out_parquet: PathBuf) -> Result<()> {
         crate::storage::ParquetCompression::Zstd,
     )?;
 
+    crate::normalize::record_text_profile(
+        &out_parquet,
+        &corpus.corpus_id,
+        corpus.uses_word_profile(),
+    )
+    .context("recording the corpus text profile")?;
+
     eprintln!(
         "Ingest complete. Wrote {} passages to {}",
         passages.len(),
         out_parquet.display()
     );
-    Ok(())
+    Ok(passages.len())
 }

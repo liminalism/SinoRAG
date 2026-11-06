@@ -401,11 +401,57 @@ fn extract_7z(
 // Local index build (doc_table + catalog + phrase + tfidf; vector left for user)
 // ---------------------------------------------------------------------------
 
-fn build_local_indexes(
+/// TF-IDF vocabulary settings for [`build_local_indexes_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct LexicalSettings {
+    pub min_df: u32,
+    pub max_df_ratio: f32,
+    pub max_features: usize,
+}
+
+impl LexicalSettings {
+    /// The settings `sinorag init` has always used, tuned on CBETA.
+    pub const CBETA: Self = Self {
+        min_df: 5,
+        max_df_ratio: 0.05,
+        max_features: 200_000,
+    };
+
+    /// For small personal collections in alphabetic scripts (document
+    /// intake): a term only needs to recur once to count, and common content
+    /// words are kept (function words are already dropped as stopwords).
+    pub const SMALL_COLLECTION: Self = Self {
+        min_df: 2,
+        max_df_ratio: 0.25,
+        max_features: 200_000,
+    };
+}
+
+/// Build doc_table, catalog and (optionally) the phrase + TF-IDF indexes for
+/// whatever is in `out_parquet`, from scratch, with the CBETA settings.
+pub fn build_local_indexes(
     data_root: &Path,
     out_parquet: &Path,
     progress: Option<&dyn InitProgress>,
     build_phrase_tfidf: bool,
+) -> Result<()> {
+    build_local_indexes_with(
+        data_root,
+        out_parquet,
+        progress,
+        build_phrase_tfidf,
+        LexicalSettings::CBETA,
+    )
+}
+
+/// [`build_local_indexes`] with explicit TF-IDF settings. Used by the
+/// Windows document-intake GUI after it re-ingests its corpus.
+pub fn build_local_indexes_with(
+    data_root: &Path,
+    out_parquet: &Path,
+    progress: Option<&dyn InitProgress>,
+    build_phrase_tfidf: bool,
+    lexical: LexicalSettings,
 ) -> Result<()> {
     let doc_table_path = data_root.join("derived").join("doc_table.bin");
     let catalog_path = data_root.join("derived").join("catalog.index");
@@ -462,9 +508,9 @@ fn build_local_indexes(
             4,       // phrase_gram_len
             5,       // min_ngram
             8,       // max_ngram
-            5,       // min_df
-            0.05,    // max_df_ratio
-            200_000, // max_features
+            lexical.min_df,
+            lexical.max_df_ratio,
+            lexical.max_features,
             2048,    // buckets
             None,    // temp_dir
             progress,

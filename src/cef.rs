@@ -42,6 +42,21 @@ pub struct CorpusToml {
 
     #[serde(default)]
     pub conversion: Option<ConversionInfo>,
+
+    /// How passage text is normalized for search: `"cjk"` (default — the
+    /// CBETA normalization: spaces and punctuation removed, case kept) or
+    /// `"words"` (for English and other alphabetic scripts: lowercased, with
+    /// whole-word boundaries kept; CJK characters are treated as in `"cjk"`).
+    /// Ignored for passages that supply `text_normalized` themselves.
+    #[serde(default)]
+    pub text_profile: Option<String>,
+}
+
+impl CorpusToml {
+    /// True for `text_profile = "words"`.
+    pub fn uses_word_profile(&self) -> bool {
+        matches!(self.text_profile.as_deref(), Some("words"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

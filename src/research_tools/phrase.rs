@@ -1,6 +1,6 @@
 use crate::datafusion_store::DataFusionStore;
 use crate::document_table::DocumentTable;
-use crate::normalize::normalize_zh;
+use crate::normalize::PhraseForms;
 use crate::phrase_index::PhraseIndex;
 use crate::research::{exact_phrase_rows, SearchSpec};
 use anyhow::Result;
@@ -17,21 +17,46 @@ pub async fn phrase_rows_with_explicit_doc_table(
     canon: Option<&[String]>,
     period: Option<&str>,
 ) -> Result<(Vec<Value>, Value)> {
-    let normalized = normalize_zh(phrase);
+    let forms = PhraseForms::new(phrase);
+    phrase_rows_for_forms(
+        store,
+        doc_table,
+        phrase_index_path,
+        &forms,
+        limit,
+        doc_range,
+        canon,
+        period,
+    )
+    .await
+}
+
+/// [`phrase_rows_with_explicit_doc_table`] for phrase forms built by the
+/// caller (e.g. `PhraseForms::from_normalized_variant`).
+pub async fn phrase_rows_for_forms(
+    store: &DataFusionStore,
+    doc_table: &DocumentTable,
+    phrase_index_path: Option<&Path>,
+    forms: &PhraseForms,
+    limit: usize,
+    doc_range: Option<(u32, u32)>,
+    canon: Option<&[String]>,
+    period: Option<&str>,
+) -> Result<(Vec<Value>, Value)> {
     let limit = limit.max(1);
 
     if let Some(index_path) = phrase_index_path {
-        if index_path.is_file() && !normalized.is_empty() {
+        if index_path.is_file() && !forms.is_empty() {
             let index = PhraseIndex::load(index_path)?;
             let gram_len = index.gram_len();
-            if normalized.chars().count() >= gram_len {
-                let result = index.candidate_ids_for_normalized_streaming(&normalized);
+            if forms.indexed_len() >= gram_len {
+                let result = index.candidate_ids_for_forms_streaming(forms);
                 let (candidate_doc_ids, candidate_stats) = match result {
                     Some(r) => (r.doc_ids, Some(json!(r.stats))),
                     None => {
                         if let Some((lo, hi)) = doc_range {
                             let (rows, mut strategy) = doc_range_rows(
-                                store, doc_table, phrase, limit, lo, hi, canon, period,
+                                store, doc_table, forms, limit, lo, hi, canon, period,
                             )
                             .await?;
                             strategy["phrase_index_path"] = json!(index_path.display().to_string());
@@ -40,7 +65,7 @@ pub async fn phrase_rows_with_explicit_doc_table(
                             strategy["gram_size"] = json!(gram_len);
                             return Ok((rows, strategy));
                         }
-                        let rows = parquet_global_rows(store, phrase, limit, canon, period).await?;
+                        let rows = parquet_global_rows(store, forms, limit, canon, period).await?;
                         return Ok((
                             rows,
                             json!({
@@ -78,7 +103,7 @@ pub async fn phrase_rows_with_explicit_doc_table(
                         .get("zh_text_normalized")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    if !text.contains(&normalized) {
+                    if !forms.matches(text) {
                         return false;
                     }
                     if let Some(canon) = canon {
@@ -117,14 +142,14 @@ pub async fn phrase_rows_with_explicit_doc_table(
             let fallback_reason = format!("phrase_shorter_than_index_gram_size_{gram_len}");
             if let Some((lo, hi)) = doc_range {
                 let (rows, mut strategy) =
-                    doc_range_rows(store, doc_table, phrase, limit, lo, hi, canon, period).await?;
+                    doc_range_rows(store, doc_table, forms, limit, lo, hi, canon, period).await?;
                 strategy["phrase_index_path"] = json!(index_path.display().to_string());
                 strategy["fallback"] = json!(true);
                 strategy["fallback_reason"] = json!(fallback_reason);
                 strategy["gram_size"] = json!(gram_len);
                 return Ok((rows, strategy));
             }
-            let rows = parquet_global_rows(store, phrase, limit, canon, period).await?;
+            let rows = parquet_global_rows(store, forms, limit, canon, period).await?;
             return Ok((
                 rows,
                 json!({
@@ -141,10 +166,10 @@ pub async fn phrase_rows_with_explicit_doc_table(
     }
 
     if let Some((lo, hi)) = doc_range {
-        return doc_range_rows(store, doc_table, phrase, limit, lo, hi, canon, period).await;
+        return doc_range_rows(store, doc_table, forms, limit, lo, hi, canon, period).await;
     }
 
-    let rows = parquet_global_rows(store, phrase, limit, canon, period).await?;
+    let rows = parquet_global_rows(store, forms, limit, canon, period).await?;
     Ok((
         rows,
         json!({
@@ -157,12 +182,12 @@ pub async fn phrase_rows_with_explicit_doc_table(
 
 async fn parquet_global_rows(
     store: &DataFusionStore,
-    phrase: &str,
+    forms: &PhraseForms,
     limit: usize,
     canon: Option<&[String]>,
     period: Option<&str>,
 ) -> Result<Vec<Value>> {
-    let mut spec = SearchSpec::exact_phrase(phrase.to_string(), limit);
+    let mut spec = SearchSpec::from_forms(forms.clone(), limit);
     if let Some(canon) = canon {
         spec.canon = canon.to_vec();
     }
@@ -177,14 +202,13 @@ async fn parquet_global_rows(
 async fn doc_range_rows(
     store: &DataFusionStore,
     doc_table: &DocumentTable,
-    phrase: &str,
+    forms: &PhraseForms,
     limit: usize,
     lo: u32,
     hi: u32,
     canon: Option<&[String]>,
     period: Option<&str>,
 ) -> Result<(Vec<Value>, Value)> {
-    let normalized = normalize_zh(phrase);
     let passage_ids: Vec<String> = (lo..=hi)
         .filter_map(|did| doc_table.passage_id(did).map(String::from))
         .collect();
@@ -194,7 +218,7 @@ async fn doc_range_rows(
             .get("zh_text_normalized")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if !text.contains(&normalized) {
+        if !forms.matches(text) {
             return false;
         }
         if let Some(canon) = canon {

@@ -1,0 +1,49 @@
+akr 0.1
+project sinorag
+
+record sinorag.intake.document-intake-gui/1 : decision {
+    title "Windows document-intake GUI: PDF/HTML/text to GD-CEF, full re-ingest and index rebuild on change"
+    state proposed
+    scope [ path "gui-installer/sinorag-installer-pdf-intake/**" ]
+    topic document-intake
+    decision """
+        gui-installer/sinorag-installer-pdf-intake is a winsafe installer variant that installs SinoRAG into its own folder (SinoRAG-Documents, own uninstall key, shortcuts and mutex) and indexes local PDF, HTML and .txt files. PDFs go through the Lege pipeline (lege-pdf-agent text_pages, plain layout, ocr=auto via Windows.Media.Ocr) with a forced-OCR retry for pages whose text layer scores as garbled. Each document is stored once under intake/docs/<work_id>/ (keyed by SHA-256 in intake/manifest.json); every run reassembles intake/cef from the manifest, replaces the source_corpus=documents partition through cef::ingest_blocking and rebuilds all indexes through init::build_local_indexes_with(SMALL_COLLECTION). The corpus uses text_profile = "words". The embedded sinorag.exe payload must be built from the same source as the intake (make-payload.ps1 writes ./sinorag.7z; build.rs fails the build when the payload's `sinorag.exe --version` differs from the checkout's). The install folder is the intake's alone: it refuses a folder holding other files or another source_corpus partition, and the uninstaller deletes the folder only when it classifies as an intake install. intake/index-state.json records the work_ids the indexes were built from; a run rebuilds whenever it differs from the manifest.
+        """
+    context """
+        User request: let someone index a set of PDFs (plus HTML and text, nothing more complex) so a model can answer questions from them over MCP; the GUI doubles as the installer and can be re-run to add documents.
+        """
+    consequences """
+        Lege-ecosystem must be checked out next to SinoRAG (path dependencies on lege-pdf/agent and pdf-text). Re-ingesting shifts doc ids, so vector.index is deleted on rebuild. Removing a document is not supported yet. The headless example intake_cli runs the same pipeline for testing. The payload has to be re-packed after every SinoRAG source change. A running sinorag.exe in the install folder (agent window, MCP server) blocks both a rebuild and an uninstall, because it keeps the indexes memory-mapped; both check for it first. Shortcuts and the uninstall entry are written before indexing, so a failed or closed run leaves a removable install.
+        """
+}
+
+record sinorag.search.word-layout-normalization/1 : decision {
+    title "Word-aware normalization for alphabetic-script corpora, opt-in per corpus, CJK path unchanged"
+    state proposed
+    scope [
+        path "src/agent/**",
+        path "src/cef.rs",
+        path "src/commands/cef.rs",
+        path "src/commands/init.rs",
+        path "src/datafusion_store.rs",
+        path "src/mcp/server.rs",
+        path "src/normalize.rs",
+        path "src/phrase_index.rs",
+        path "src/research/mod.rs",
+        path "src/research_tools/phrase.rs",
+        path "src/text_analyzer.rs",
+        path "src/tfidf/**",
+        path "src/tools/engine.rs"
+    ]
+    topic text-normalization
+    decision """
+        Passages from a GD-CEF corpus with text_profile = "words" are stored with normalize_words: dense CJK/kana/hangul characters go through the normalize_zh pipeline unchanged, every other letter/digit run is lowercased and wrapped in single spaces. Queries are matched with PhraseForms: CJK-layout stored text (no space, which normalize_zh never emits) is tested with normalize_zh(query), word-layout stored text with normalize_words(query). Pure-CJK queries produce identical forms, so SQL, phrase-index lookups and verification run exactly as before. TF-IDF adds word unigram/bigram features (hashed under a \u0001 prefix, English stopwords dropped) only for text containing a space. Data roots with a word corpus carry data/text_profiles.json, which makes the MCP server and `sinorag agent` append doctrine/word_corpus.md to their instructions.
+        """
+    context """
+        normalize_zh strips all spaces and keeps case, so English phrase search was case-sensitive with no word boundaries ("cat" matched "concatenate"), and TF-IDF used a CJK-only filter, so English passages had zero features and similar/frontier/source-investigate returned nothing. The user required CBETA/CJK behaviour to stay unchanged.
+        """
+    consequences """
+        CBETA indexes and tool outputs are byte-identical to the previous release (see the regression evidence). English search has no stemming: "pump" does not match "pumps". Snippets for alphabetic passages use a word-snapped ~60-word window. LexicalSettings::SMALL_COLLECTION (min_df 2, max_df 25%) exists for intake; init keeps LexicalSettings::CBETA.
+        """
+    author "dk"
+}

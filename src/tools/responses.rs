@@ -271,6 +271,16 @@ pub struct WorkInfo {
     pub passage_count: usize,
 }
 
+/// Response from the work-metadata tool
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct WorkMetadataResponse {
+    pub schema: &'static str,
+    pub requested_count: usize,
+    pub found_count: usize,
+    pub works: Vec<WorkInfo>,
+    pub missing_work_ids: Vec<String>,
+}
+
 /// Response from the catalog-index-info tool
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CatalogIndexInfoResponse {

@@ -220,8 +220,20 @@ fn find_char_offsets(haystack: &str, needle: &str) -> Vec<usize> {
 }
 
 fn find_offsets_for_terms(haystack: &str, terms: &[String]) -> Vec<usize> {
+    // Terms come in both stored layouts (see `pair_term_variants`); use the
+    // ones for this passage's layout. CJK-layout text never contains a space,
+    // so there only the original `normalize_zh` terms are tried, as before.
+    let word_layout = crate::normalize::has_word_layout(haystack);
     let mut offsets = terms
         .iter()
+        .filter(|term| {
+            let spaced = term.contains(' ');
+            if word_layout {
+                spaced || term.chars().all(crate::normalize::is_dense_char)
+            } else {
+                !spaced
+            }
+        })
         .flat_map(|term| find_char_offsets(haystack, term))
         .collect::<Vec<_>>();
     offsets.sort_unstable();
@@ -302,6 +314,11 @@ fn pair_term_variants(term: &str, allow_variants: bool) -> Vec<String> {
     let normalized = crate::normalize::normalize_zh(term);
     if !normalized.is_empty() && seen.insert(normalized.clone()) {
         terms.push(normalized);
+    }
+    // Word-layout form, for alphabetic-script passages.
+    let words = crate::normalize::normalize_words(term);
+    if !words.trim().is_empty() && seen.insert(words.clone()) {
+        terms.push(words);
     }
     if allow_variants {
         let tables = crate::templates::variants::VariantTables::load();
@@ -1921,7 +1938,7 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::SearchRequest,
     ) -> Result<crate::tools::responses::SearchResponse> {
-        use crate::datafusion_store::{sql_literal, string_contains_sql};
+        use crate::datafusion_store::sql_literal;
         use crate::normalize::normalize_zh;
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::research_tools::scopes::{group_hits_by_outline_node, OutlineSearchLevel};
@@ -2022,11 +2039,12 @@ impl ToolEngine {
                 candidate_rows
             } else {
                 let normalized_phrase = normalize_zh(phrase);
+                let phrase_forms = crate::normalize::PhraseForms::new(phrase);
                 let mut where_parts = Vec::new();
-                if !normalized_phrase.is_empty() {
-                    where_parts.push(string_contains_sql(
+                if !phrase_forms.is_empty() {
+                    where_parts.push(crate::datafusion_store::phrase_match_sql(
                         "zh_text_normalized",
-                        &normalized_phrase,
+                        &phrase_forms,
                     ));
                 }
                 if let Some(canon) = canon_for_index {
@@ -2486,7 +2504,6 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::CanonicalSourceRequest,
     ) -> Result<crate::tools::responses::CanonicalSourceResponse> {
-        use crate::datafusion_store::string_contains_sql;
         use crate::normalize::normalize_zh;
         use crate::tools::responses::{
             CanonicalSourceHit, CanonicalSourceResponse, SearchStrategy,
@@ -2495,9 +2512,13 @@ impl ToolEngine {
         let passages = self.passages().await?;
 
         let normalized = normalize_zh(&req.phrase);
+        let phrase_forms = crate::normalize::PhraseForms::new(&req.phrase);
         let mut where_parts = Vec::new();
-        if !normalized.is_empty() {
-            where_parts.push(string_contains_sql("zh_text_normalized", &normalized));
+        if !phrase_forms.is_empty() {
+            where_parts.push(crate::datafusion_store::phrase_match_sql(
+                "zh_text_normalized",
+                &phrase_forms,
+            ));
         }
 
         let canon = expand_optional_filter(req.canon.as_deref());
@@ -2582,7 +2603,7 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::HeadingSearchRequest,
     ) -> Result<crate::tools::responses::HeadingSearchResponse> {
-        use crate::datafusion_store::{sql_literal, string_contains_sql};
+        use crate::datafusion_store::sql_literal;
         use crate::tools::responses::{HeadingSearchHit, HeadingSearchResponse, SearchStrategy};
 
         let passages = self.passages().await?;
@@ -2594,7 +2615,10 @@ impl ToolEngine {
             where_parts.push(format!(
                 "(strpos(lower(heading), lower({q})) > 0 OR strpos(lower(heading_path), lower({q})) > 0 OR {norm})",
                 q = sql_literal(&req.query),
-                norm = string_contains_sql("zh_text_normalized", &normalized_query),
+                norm = crate::datafusion_store::phrase_match_sql(
+                    "zh_text_normalized",
+                    &crate::normalize::PhraseForms::new(&req.query)
+                ),
             ));
         }
         exact_any_sql(&mut where_parts, "canon", &canon);
@@ -2870,6 +2894,69 @@ impl ToolEngine {
             source_format,
             section_count,
             side_by_side: req.side_by_side,
+        })
+    }
+
+    /// Implement the work-metadata tool
+    pub async fn work_metadata_impl(
+        &self,
+        req: crate::tools::requests::WorkMetadataRequest,
+    ) -> Result<crate::tools::responses::WorkMetadataResponse> {
+        use std::collections::HashSet;
+
+        use crate::tools::responses::{WorkInfo, WorkMetadataResponse};
+
+        if req.work_ids.is_empty() {
+            return Err(ToolError::InvalidArgs(
+                "work-metadata requires at least one work_id".to_string(),
+            )
+            .into_anyhow());
+        }
+        if req.work_ids.len() > 100 {
+            return Err(ToolError::InvalidArgs(
+                "work-metadata accepts at most 100 work_ids per call".to_string(),
+            )
+            .into_anyhow());
+        }
+
+        let catalog = self.catalog().await?;
+        let mut seen = HashSet::new();
+        let mut works = Vec::new();
+        let mut missing_work_ids = Vec::new();
+
+        for raw_work_id in req.work_ids {
+            let work_id = raw_work_id.trim();
+            if work_id.is_empty() {
+                return Err(ToolError::InvalidArgs(
+                    "work-metadata work_ids must not contain empty strings".to_string(),
+                )
+                .into_anyhow());
+            }
+            if !seen.insert(work_id.to_string()) {
+                continue;
+            }
+
+            if let Some(work) = catalog.get_work(work_id) {
+                works.push(WorkInfo {
+                    work_id: work.work_id.clone(),
+                    main_title: work.main_title.clone(),
+                    author: Some(work.author.clone()),
+                    period: Some(work.period.clone()),
+                    canon: Some(work.canon.clone()),
+                    traditions: work.traditions.clone(),
+                    passage_count: work.passage_count as usize,
+                });
+            } else {
+                missing_work_ids.push(work_id.to_string());
+            }
+        }
+
+        Ok(WorkMetadataResponse {
+            schema: "sinorag-work-metadata-v1",
+            requested_count: seen.len(),
+            found_count: works.len(),
+            works,
+            missing_work_ids,
         })
     }
 
@@ -3256,7 +3343,6 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::PhraseIndexSearchRequest,
     ) -> Result<crate::tools::responses::PhraseIndexSearchResponse> {
-        use crate::normalize::normalize_zh;
         use crate::phrase_index::PhraseIndex;
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::tools::errors::ToolError;
@@ -3279,8 +3365,7 @@ impl ToolEngine {
         let phrase_index_path_ref = phrase_index_path.as_deref().expect("checked above");
         let phrase_index = PhraseIndex::load(phrase_index_path_ref)?;
         let gram_len = phrase_index.gram_len();
-        let normalized = normalize_zh(&req.phrase);
-        let phrase_len = normalized.chars().count();
+        let phrase_len = crate::normalize::PhraseForms::new(&req.phrase).indexed_len();
         if phrase_len < gram_len {
             return Err(ToolError::InvalidArgs(format!(
                 "phrase-index-search requires at least {gram_len} normalized characters for this phrase index; got {phrase_len}. Use search for short phrases so it can fall back to Parquet."
@@ -3826,7 +3911,6 @@ impl ToolEngine {
         &self,
         req: crate::tools::requests::CollocationSearchRequest,
     ) -> Result<crate::tools::responses::CollocationSearchResponse> {
-        use crate::normalize::normalize_zh;
         use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
         use crate::research_tools::stats::score_collocates;
         use crate::tools::responses::{
@@ -3871,7 +3955,7 @@ impl ToolEngine {
         )
         .await?;
 
-        let normalized_phrase = normalize_zh(&req.phrase);
+        let phrase_forms = crate::normalize::PhraseForms::new(&req.phrase);
 
         // Collect n-gram hashes from the window around each phrase occurrence
         let mut near_counts: FxHashMap<u64, u32> = FxHashMap::default();
@@ -3895,11 +3979,12 @@ impl ToolEngine {
             );
 
             // Near: n-grams within the window around each occurrence
-            if normalized_phrase.is_empty() {
+            let normalized_phrase = phrase_forms.form_for(norm);
+            if normalized_phrase.trim().is_empty() {
                 continue;
             }
             let mut search_start = 0usize;
-            while let Some(rel_pos) = norm[search_start..].find(&normalized_phrase) {
+            while let Some(rel_pos) = norm[search_start..].find(normalized_phrase) {
                 let byte_pos = search_start + rel_pos;
                 let char_pos = norm[..byte_pos].chars().count();
                 let phrase_chars = normalized_phrase.chars().count();
@@ -6139,16 +6224,17 @@ impl ToolEngine {
         period: Option<&str>,
         source_work_id: Option<&str>,
     ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
-        use crate::research_tools::phrase::phrase_rows_with_explicit_doc_table;
+        use crate::research_tools::phrase::phrase_rows_for_forms;
 
         let mut rows = Vec::<serde_json::Value>::new();
         let mut strategies = Vec::new();
         for variant in variants {
-            let (variant_rows, strategy) = phrase_rows_with_explicit_doc_table(
+            let variant_forms = crate::normalize::PhraseForms::from_normalized_variant(variant);
+            let (variant_rows, strategy) = phrase_rows_for_forms(
                 passages,
                 doc_table,
                 phrase_index_path,
-                variant,
+                &variant_forms,
                 limit,
                 doc_range,
                 canon,
@@ -6981,9 +7067,24 @@ impl ToolEngine {
         if !verified && req.include_near_matches {
             use crate::normalize::normalize_zh;
             let normalized = normalize_zh(&req.quote);
+            let quote_forms = crate::normalize::PhraseForms::new(&req.quote);
 
             let tfidf_candidates: Vec<(u32, f32)> = if let Ok(tfidf) = self.tfidf().await {
-                tfidf.query_top_k(&normalized, req.near_match_limit * 5)
+                let k = req.near_match_limit * 5;
+                let mut found = tfidf.query_top_k(&normalized, k);
+                if !quote_forms.is_single() {
+                    // Word-layout passages are scored on word features, which
+                    // only the word form of the quote produces.
+                    for (doc, score) in tfidf.query_top_k(&quote_forms.words, k) {
+                        match found.iter_mut().find(|(d, _)| *d == doc) {
+                            Some(entry) => entry.1 = entry.1.max(score),
+                            None => found.push((doc, score)),
+                        }
+                    }
+                    found.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    found.truncate(k.max(1));
+                }
+                found
             } else {
                 Vec::new()
             };
@@ -7024,7 +7125,7 @@ impl ToolEngine {
                             .get("zh_text_normalized")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let overlap = character_overlap_score(&normalized, text);
+                        let overlap = character_overlap_score(quote_forms.form_for(text), text);
                         Some((overlap, pid, row))
                     })
                     .collect();
@@ -7086,7 +7187,7 @@ impl ToolEngine {
                             .get("zh_text_normalized")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let overlap = character_overlap_score(&normalized, text);
+                        let overlap = character_overlap_score(quote_forms.form_for(text), text);
                         Some((overlap, pid, row))
                     })
                     .collect();

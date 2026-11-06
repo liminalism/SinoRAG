@@ -1,8 +1,7 @@
 pub mod context_expand;
 
-use crate::datafusion_store::{sql_literal, string_contains_sql, DataFusionStore};
+use crate::datafusion_store::{phrase_match_sql, sql_literal, DataFusionStore};
 use crate::document_table::DocumentTable;
-use crate::normalize::normalize_zh;
 use crate::phrase_index::{ids_to_sql_list, PhraseIndex};
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -15,14 +14,21 @@ pub const CREATED_BY: &str = "sinorag-rust";
 #[derive(Debug, Clone)]
 pub struct SearchSpec {
     pub normalized: String,
+    /// Both stored layouts of the phrase; `normalized` is `forms.zh`.
+    pub forms: crate::normalize::PhraseForms,
     pub canon: Vec<String>,
     pub limit: usize,
 }
 
 impl SearchSpec {
     pub fn exact_phrase(phrase: String, limit: usize) -> Self {
+        Self::from_forms(crate::normalize::PhraseForms::new(&phrase), limit)
+    }
+
+    pub fn from_forms(forms: crate::normalize::PhraseForms, limit: usize) -> Self {
         Self {
-            normalized: normalize_zh(&phrase),
+            normalized: forms.zh.clone(),
+            forms,
             canon: Vec::new(),
             limit,
         }
@@ -39,10 +45,13 @@ pub async fn exact_phrase_rows_with_index(
     phrase_index_path: Option<&Path>,
 ) -> Result<Vec<Value>> {
     if let Some(index_path) = phrase_index_path {
-        if index_path.is_file() && !spec.normalized.is_empty() {
+        if index_path.is_file() && !spec.forms.is_empty() {
             let index = PhraseIndex::load(index_path)?;
-            if spec.normalized.chars().count() >= index.gram_len() {
-                let doc_ids = index.candidate_ids_for_normalized(&spec.normalized, usize::MAX);
+            if spec.forms.indexed_len() >= index.gram_len() {
+                let doc_ids = index
+                    .candidate_ids_for_forms_streaming(&spec.forms)
+                    .map(|r| r.doc_ids)
+                    .unwrap_or_default();
 
                 let doc_table_path = index_path
                     .parent()
@@ -67,8 +76,8 @@ pub async fn exact_phrase_rows_with_index(
     }
 
     let mut where_parts = Vec::new();
-    if !spec.normalized.is_empty() {
-        where_parts.push(string_contains_sql("zh_text_normalized", &spec.normalized));
+    if !spec.forms.is_empty() {
+        where_parts.push(phrase_match_sql("zh_text_normalized", &spec.forms));
     }
     if !spec.canon.is_empty() {
         let quoted = spec
@@ -117,7 +126,7 @@ async fn exact_phrase_rows_for_ids(
         let id_list = ids_to_sql_list(chunk);
         let mut where_parts = vec![
             format!("passage_id IN ({id_list})"),
-            string_contains_sql("zh_text_normalized", &spec.normalized),
+            phrase_match_sql("zh_text_normalized", &spec.forms),
         ];
         if !spec.canon.is_empty() {
             let quoted = spec
@@ -317,6 +326,9 @@ pub fn quote_for_phrase(raw: &str, phrase: &str) -> String {
     if raw.is_empty() {
         return String::new();
     }
+    if is_alphabetic_text(raw) {
+        return alphabetic_quote(raw, phrase);
+    }
     if phrase.is_empty() {
         return raw.chars().take(120).collect();
     }
@@ -333,9 +345,134 @@ pub fn quote_for_phrase(raw: &str, phrase: &str) -> String {
     raw.chars().take(120).collect()
 }
 
+/// Mostly letters outside the CJK/kana/hangul blocks (English and other
+/// alphabetic-script passages). CJK passages are never alphabetic, so their
+/// quotes keep the original character window above.
+fn is_alphabetic_text(raw: &str) -> bool {
+    let (mut dense, mut other) = (0usize, 0usize);
+    for ch in raw.chars().filter(|c| c.is_alphabetic()).take(400) {
+        if crate::normalize::is_dense_char(ch) {
+            dense += 1;
+        } else {
+            other += 1;
+        }
+    }
+    other >= 20 && other > dense * 4
+}
+
+/// Quote for alphabetic text: find the phrase ignoring case and runs of
+/// whitespace/punctuation, then take ~60 words around it, cut at word
+/// boundaries.
+fn alphabetic_quote(raw: &str, phrase: &str) -> String {
+    const BEFORE: usize = 160;
+    const AFTER: usize = 260;
+    let chars: Vec<char> = raw.chars().collect();
+    let hit = find_words_ci(&chars, phrase);
+    let (start, end) = match hit {
+        Some((s, e)) => (s.saturating_sub(BEFORE), (e + AFTER).min(chars.len())),
+        None => (0, (BEFORE + AFTER).min(chars.len())),
+    };
+    // Snap to whitespace so words are not cut.
+    let start = if start == 0 {
+        0
+    } else {
+        (start..chars.len().min(start + 30))
+            .find(|&i| chars[i].is_whitespace())
+            .map_or(start, |i| i + 1)
+    };
+    let end = if end >= chars.len() {
+        chars.len()
+    } else {
+        (end.saturating_sub(30)..end)
+            .rev()
+            .find(|&i| chars[i].is_whitespace())
+            .unwrap_or(end)
+    };
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(chars[start..end].iter().map(|c| if *c == '\n' { ' ' } else { *c }));
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// Char range of the first occurrence of `phrase`'s words in `chars`,
+/// case-insensitive, with any run of non-alphanumerics between words.
+fn find_words_ci(chars: &[char], phrase: &str) -> Option<(usize, usize)> {
+    let words: Vec<Vec<char>> = phrase
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.chars().flat_map(char::to_lowercase).collect())
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    let lower: Vec<char> = chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    let first = &words[0];
+    'outer: for s in 0..lower.len() {
+        if s > 0 && lower[s - 1].is_alphanumeric() {
+            continue;
+        }
+        let mut i = s;
+        for (k, w) in words.iter().enumerate() {
+            if k > 0 {
+                let gap_start = i;
+                while i < lower.len() && !lower[i].is_alphanumeric() {
+                    i += 1;
+                }
+                if i == gap_start {
+                    continue 'outer;
+                }
+            }
+            if lower.len() < i + w.len() || lower[i..i + w.len()] != w[..] {
+                continue 'outer;
+            }
+            i += w.len();
+        }
+        if i < lower.len() && lower[i].is_alphanumeric() && !first.is_empty() {
+            continue;
+        }
+        return Some((s, i));
+    }
+    None
+}
+
 pub fn default_registry_for(parquet_path: &Path) -> PathBuf {
     parquet_path
         .parent()
         .map(|p| p.join("completions.duckdb"))
         .unwrap_or_else(|| PathBuf::from("GraphDiscovery/Runs/rust/completions.duckdb"))
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::quote_for_phrase;
+
+    #[test]
+    fn cjk_quote_is_unchanged() {
+        let raw = "如是我聞。一時佛在舍衛國祇樹給孤獨園，與大比丘眾千二百五十人俱。爾時世尊食時著衣持鉢入舍衛大城乞食。";
+        let start = raw.find("世尊").unwrap();
+        let start_char = raw[..start].chars().count().saturating_sub(24);
+        let expected: String = raw.chars().skip(start_char).take(48 + 2).collect();
+        assert_eq!(quote_for_phrase(raw, "世尊"), expected);
+        assert_eq!(quote_for_phrase(raw, ""), raw.chars().take(120).collect::<String>());
+    }
+
+    #[test]
+    fn english_quote_is_case_insensitive_and_word_bounded() {
+        let filler = "Routine inspection notes follow for every unit in the plant. ".repeat(8);
+        let raw = format!("{filler}The Coolant\nPump on unit seven was replaced. {filler}");
+        let q = quote_for_phrase(&raw, "coolant pump");
+        assert!(q.contains("Coolant Pump on unit seven"), "{q}");
+        assert!(q.starts_with('…') && q.ends_with('…'));
+        // Snapped to word boundaries: no partial word right after the ellipsis.
+        let first_word = q.trim_start_matches('…').split(' ').next().unwrap();
+        assert!(raw.split_whitespace().any(|w| w == first_word), "{first_word}");
+    }
 }

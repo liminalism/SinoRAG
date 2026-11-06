@@ -703,10 +703,17 @@ fn is_cjk(ch: char) -> bool {
 }
 
 fn parse_traditions(s: &str, interner: &mut LocalInterner) -> Vec<Arc<str>> {
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(s) {
+        return values
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .map(|value| intern(interner, &value))
+            .collect();
+    }
     s.split(',')
-        .map(|t| t.trim())
-        .filter(|t| !t.is_empty())
-        .map(|t| intern(interner, t))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| intern(interner, value))
         .collect()
 }
 

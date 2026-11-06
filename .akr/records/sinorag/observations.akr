@@ -1,0 +1,37 @@
+akr 0.1
+project sinorag
+
+record sinorag.intake.shared-payload-stale/1 : observation {
+    title "Shared installer payload sinorag.7z holds sinorag.exe 0.5.0, not the 0.5.5 source"
+    state superseded
+    scope [
+        path "gui-installer/sinorag-installer-pdf-intake/**",
+        path "gui-installer/sinorag-installer-winsafe/**",
+        path "gui-installer/sinorag-installer/sinorag.7z"
+    ]
+    statement """
+        gui-installer/sinorag-installer/sinorag.7z (working-tree copy, 21,131,926 bytes, dated 2026-07-25) unpacks to a sinorag.exe built 2026-05-28 that reports `sinorag 0.5.0`; Cargo.toml is at 0.5.5. That exe has no text_profile support: over indexes built by the document intake (text_profile = "words") the phrases "COOLANT Pump" and "heron colony" return 0 hits and the fragment "pum" returns 1, where a 0.5.5 release build returns 1, 1 and 0. The Freya and winsafe CBETA installers embed this payload and read their expected version from Cargo.toml, so they re-extract it on every run. The document intake now embeds its own gui-installer/sinorag-installer-pdf-intake/sinorag.7z (0.5.5, packed by make-payload.ps1); the shared file was left as it was.
+        """
+    observed_at git:576bcec1b067aeb270b8c021b1f82a8ca1991ce8
+    method command
+    watches [ "gui-installer/sinorag-installer/sinorag.7z", "Cargo.toml" ]
+    author "dk"
+}
+
+record sinorag.intake.shared-payload-stale/2 : observation {
+    title "Shared installer payload sinorag.7z holds sinorag.exe 0.5.0, not the 0.5.5 source"
+    state verified
+    scope [
+        path "gui-installer/sinorag-installer-pdf-intake/**",
+        path "gui-installer/sinorag-installer-winsafe/**",
+        path "gui-installer/sinorag-installer/sinorag.7z"
+    ]
+    statement """
+        gui-installer/sinorag-installer/sinorag.7z (21,131,926 bytes, committed unchanged in 381c39f) unpacks to a sinorag.exe built 2026-05-28 that reports `sinorag 0.5.0`; Cargo.toml is at 0.5.5. That exe has no text_profile support: over indexes built by the document intake (text_profile = "words") the phrases "COOLANT Pump" and "heron colony" return 0 hits and the fragment "pum" returns 1, where a 0.5.5 release build returns 1, 1 and 0. The Freya and winsafe CBETA installers embed this payload and read their expected version from Cargo.toml, so they re-extract it on every run. The document intake embeds its own gui-installer/sinorag-installer-pdf-intake/sinorag.7z (0.5.5, packed by make-payload.ps1) instead.
+        """
+    observed_at git:381c39fff2c5de15c4f85f08d83d868ac6890298
+    method command
+    watches [ "gui-installer/sinorag-installer/sinorag.7z", "Cargo.toml" ]
+    supersedes [ @sinorag.intake.shared-payload-stale/1 ]
+    author "dk"
+}

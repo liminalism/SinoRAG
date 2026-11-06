@@ -157,6 +157,32 @@ pub fn string_contains_sql(column: &str, value: &str) -> String {
     format!("strpos({column}, {}) > 0", sql_literal(value))
 }
 
+/// SQL form of [`crate::normalize::PhraseForms::matches`]. A pure-CJK phrase
+/// yields exactly `string_contains_sql(column, zh)`, so CJK queries run the
+/// same SQL as before; otherwise each stored layout is tested with its form.
+pub fn phrase_match_sql(column: &str, forms: &crate::normalize::PhraseForms) -> String {
+    if forms.is_single() {
+        return string_contains_sql(column, &forms.zh);
+    }
+    let mut parts = Vec::new();
+    if !forms.zh.is_empty() {
+        parts.push(format!(
+            "(strpos({column}, ' ') = 0 AND {})",
+            string_contains_sql(column, &forms.zh)
+        ));
+    }
+    if !forms.words.trim().is_empty() {
+        parts.push(format!(
+            "(strpos({column}, ' ') > 0 AND {})",
+            string_contains_sql(column, &forms.words)
+        ));
+    }
+    if parts.is_empty() {
+        return "false".to_string();
+    }
+    format!("({})", parts.join(" OR "))
+}
+
 fn record_batches_to_json(batches: &[RecordBatch]) -> Vec<Value> {
     let mut out = Vec::new();
 

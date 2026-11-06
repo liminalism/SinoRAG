@@ -201,6 +201,59 @@ impl PhraseIndex {
             .unwrap_or_default()
     }
 
+    /// Candidates for a phrase in both stored layouts (see
+    /// [`crate::normalize::PhraseForms`]). Grams ignore spaces, so the two
+    /// forms differ only by case; a pure-CJK phrase does one lookup exactly
+    /// as before. Results are sorted, deduplicated doc ids; candidates still
+    /// need verifying with `PhraseForms::matches`.
+    pub fn candidate_ids_for_forms_streaming(
+        &self,
+        forms: &crate::normalize::PhraseForms,
+    ) -> Option<PhraseCandidateResult> {
+        let first = self.candidate_ids_for_normalized_streaming(&forms.zh)?;
+        let words_compact: String = forms.words.chars().filter(|c| *c != ' ').collect();
+        if forms.is_single() || words_compact == forms.zh {
+            return Some(first);
+        }
+        let second = self.candidate_ids_for_normalized_streaming(&words_compact)?;
+        let (a, b) = (&first.doc_ids, &second.doc_ids);
+        let mut merged = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() || j < b.len() {
+            let next = match (a.get(i), b.get(j)) {
+                (Some(&x), Some(&y)) if x == y => {
+                    i += 1;
+                    j += 1;
+                    x
+                }
+                (Some(&x), Some(&y)) if x < y => {
+                    i += 1;
+                    x
+                }
+                (Some(_), Some(&y)) => {
+                    j += 1;
+                    y
+                }
+                (Some(&x), None) => {
+                    i += 1;
+                    x
+                }
+                (None, Some(&y)) => {
+                    j += 1;
+                    y
+                }
+                (None, None) => break,
+            };
+            merged.push(next);
+        }
+        let mut stats = first.stats;
+        stats.final_candidates = merged.len();
+        Some(PhraseCandidateResult {
+            doc_ids: merged,
+            stats,
+        })
+    }
+
     /// Hybrid intersection: bitwise-AND across all Roaring postings, then
     /// stream-intersect each varint posting against the result.
     pub fn candidate_ids_for_normalized_streaming(
