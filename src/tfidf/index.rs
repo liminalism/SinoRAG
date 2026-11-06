@@ -377,6 +377,9 @@ impl TfidfIndex {
             let h = xxh3_64(gram.as_bytes());
             hash_to_str.entry(h).or_insert(gram);
         }
+        crate::tfidf::ngram::for_each_word_feature(seed_text, |word, h| {
+            hash_to_str.entry(h).or_insert_with(|| word.to_string());
+        });
 
         let mut shared: Vec<SharedNgram> = Vec::new();
         let (mut i, mut j) = (0usize, 0usize);
@@ -492,6 +495,13 @@ impl TfidfIndex {
                 }
             }
         }
+        // Word-layout query text (see `crate::normalize::normalize_words`).
+        crate::tfidf::ngram::for_each_word_feature(text, |_, h| {
+            total += 1;
+            if let Some(tid) = self.query_lookup(h) {
+                *term_counts.entry(tid).or_insert(0) += 1;
+            }
+        });
         if term_counts.is_empty() || total == 0 {
             return Vec::new();
         }
@@ -616,7 +626,34 @@ impl TfidfIndex {
 // Free helpers — operate on raw text, no index needed
 // ---------------------------------------------------------------------------
 
+/// Word-layout version of [`long_common_substrings`]: shared runs of whole
+/// words (longest first, at least `min_len` characters), so a reader sees
+/// "coolant pump bearing" rather than ragged character slices of it.
+fn long_common_word_runs(a: &str, b: &str, min_len: usize, limit: usize) -> Vec<String> {
+    let (short, long) = if a.len() > b.len() { (b, a) } else { (a, b) };
+    let words: Vec<&str> = short.split(' ').filter(|w| !w.is_empty()).collect();
+    let mut out: Vec<String> = Vec::new();
+    for n in (1..=words.len().min(12)).rev() {
+        for window in words.windows(n) {
+            let run = window.join(" ");
+            if run.chars().count() < min_len || out.iter().any(|o| o.contains(&run)) {
+                continue;
+            }
+            if long.contains(&format!(" {run} ")) {
+                out.push(run);
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn long_common_substrings(a: &str, b: &str, min_len: usize, limit: usize) -> Vec<String> {
+    if crate::normalize::has_word_layout(a) && crate::normalize::has_word_layout(b) {
+        return long_common_word_runs(a, b, min_len, limit);
+    }
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut matches = Vec::new();
     let (short, long) = if a.chars().count() > b.chars().count() {
@@ -1736,4 +1773,28 @@ fn round_f64(value: f64, places: i32) -> f64 {
 #[allow(dead_code)]
 fn _idf_keep_alive(t: &TfidfIndex, tid: TermId) -> f32 {
     t.idf_at(tid)
+}
+
+#[cfg(test)]
+mod word_run_tests {
+    use super::long_common_substrings;
+    use crate::normalize::{normalize_words, normalize_zh};
+
+    #[test]
+    fn word_layout_shares_whole_word_runs() {
+        let a = normalize_words("The coolant pump bearing on unit four showed vibration.");
+        let b = normalize_words("A coolant pump bearing seized; unit four was shut down.");
+        assert_eq!(
+            long_common_substrings(&a, &b, 6, 8),
+            vec!["coolant pump bearing".to_string(), "unit four".to_string()]
+        );
+    }
+
+    #[test]
+    fn cjk_layout_keeps_character_fragments() {
+        let a = normalize_zh("如是我聞一時佛在舍衛國");
+        let b = normalize_zh("爾時如是我聞一時佛在");
+        let got = long_common_substrings(&a, &b, 4, 3);
+        assert_eq!(got[0], normalize_zh("如是我聞一時佛在"));
+    }
 }

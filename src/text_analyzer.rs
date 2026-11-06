@@ -87,10 +87,6 @@ fn analyze_current_normalized(opts: &AnalyzeOptions, scratch: &mut AnalyzeScratc
     );
 
     let num_chars = scratch.char_byte_offsets.len().saturating_sub(1);
-    if num_chars < opts.min_n {
-        return;
-    }
-
     let bytes = scratch.filtered.as_bytes();
     for n in opts.min_n..=opts.max_n {
         if num_chars < n {
@@ -105,6 +101,16 @@ fn analyze_current_normalized(opts: &AnalyzeOptions, scratch: &mut AnalyzeScratc
             }
             scratch.all_hashes.push(xxh3_64(slice));
         }
+    }
+
+    // TF-IDF: word-layout passages (alphabetic-script corpora) also get word
+    // features. CJK-layout text has no spaces, so this adds nothing there.
+    if opts.filter == FilterMode::CjkOnly {
+        let hashes = &mut scratch.all_hashes;
+        crate::tfidf::ngram::for_each_word_feature(&scratch.normalized, |_, h| hashes.push(h));
+    }
+    if scratch.all_hashes.is_empty() {
+        return;
     }
 
     if opts.dedup {

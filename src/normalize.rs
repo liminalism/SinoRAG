@@ -145,6 +145,216 @@ pub fn normalize_zh_into(text: &str, out: &mut String) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Word-aware normalization (alphabetic-script corpora)
+// ---------------------------------------------------------------------------
+//
+// `normalize_zh` deletes every space and keeps case, which is right for
+// classical Chinese but leaves English with no word boundaries
+// ("cat" matches "concatenate") and case-sensitive matching.
+//
+// `normalize_words` is the alternative stored form for corpora ingested with
+// `text_profile = "words"` (GD-CEF corpus.toml). The rules are:
+//   * CJK ideographs, kana and hangul ("dense" characters) go through exactly
+//     the `normalize_zh` pipeline (NFKC, punctuation dropped, variant map),
+//     and adjacent dense characters are still joined without spaces;
+//   * every other letter/digit run is a word: lowercased, and wrapped in
+//     single spaces, so " coolant pump " — a stored text and a query agree
+//     on whole-word boundaries.
+//
+// Two properties keep CJK behaviour unchanged, and the tests pin them:
+//   1. For text without word characters, `normalize_words == normalize_zh`.
+//   2. `normalize_zh` output never contains a space, while word-layout text
+//      with any word character always does. So whether a stored passage
+//      uses the word layout can be told from the text itself
+//      (`has_word_layout`), and queries are matched against each layout with
+//      the matching query form (`PhraseForms`).
+
+/// Characters that keep the dense (CJK) treatment under `normalize_words`.
+pub fn is_dense_char(ch: char) -> bool {
+    matches!(ch,
+        '\u{3040}'..='\u{30ff}'     // hiragana, katakana
+        | '\u{3100}'..='\u{312f}'   // bopomofo
+        | '\u{3400}'..='\u{4dbf}'
+        | '\u{4e00}'..='\u{9fff}'
+        | '\u{ac00}'..='\u{d7af}'   // hangul syllables
+        | '\u{f900}'..='\u{faff}'
+        | '\u{20000}'..='\u{3134f}')
+}
+
+/// Word-aware normalization; see the section comment above.
+pub fn normalize_words(text: &str) -> String {
+    let vmap = variant_map();
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut in_word = false;
+    let mut broke = false; // a dropped separator since the last kept char
+    for ch in text.nfkc() {
+        if ch.is_whitespace() || is_strippable_category(ch) {
+            broke = true;
+            continue;
+        }
+        let ch = vmap.get(&ch).copied().unwrap_or(ch);
+        if is_dense_char(ch) {
+            if in_word {
+                out.push(' ');
+                in_word = false;
+            }
+            out.push(ch);
+        } else {
+            if !in_word {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            } else if broke {
+                out.push(' ');
+            }
+            out.extend(ch.to_lowercase());
+            in_word = true;
+        }
+        broke = false;
+    }
+    if in_word {
+        out.push(' ');
+    }
+    out
+}
+
+/// True when a stored normalized text uses the word layout. `normalize_zh`
+/// never emits whitespace, so CBETA and other CJK-normalized passages are
+/// always `false`.
+#[inline]
+pub fn has_word_layout(normalized: &str) -> bool {
+    normalized.as_bytes().contains(&b' ')
+}
+
+/// A query phrase in both stored layouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhraseForms {
+    /// `normalize_zh(phrase)`: matched against CJK-layout passages.
+    pub zh: String,
+    /// `normalize_words(phrase)`: matched against word-layout passages.
+    pub words: String,
+}
+
+impl PhraseForms {
+    pub fn new(phrase: &str) -> Self {
+        let zh = normalize_zh(phrase);
+        let words = normalize_words(phrase);
+        Self { zh, words }
+    }
+
+    /// Forms for an already-normalized variant string (as produced by
+    /// `normalize_zh` or `normalize_words`), matched only against the layout
+    /// it belongs to. Pure-CJK variants apply to both layouts.
+    pub fn from_normalized_variant(variant: &str) -> Self {
+        if variant.contains(' ') {
+            return Self { zh: String::new(), words: variant.to_string() };
+        }
+        // Re-normalizing keeps the CJK path identical to callers that used
+        // to pass these variants through `normalize_zh` a second time.
+        let zh = normalize_zh(variant);
+        if variant.chars().all(is_dense_char) {
+            Self { words: zh.clone(), zh }
+        } else {
+            Self { zh, words: String::new() }
+        }
+    }
+
+    /// Both layouts agree (pure CJK phrase): one form does for everything,
+    /// and callers keep their original single-form code path.
+    pub fn is_single(&self) -> bool {
+        self.zh == self.words
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.zh.is_empty() && self.words.trim().is_empty()
+    }
+
+    /// Distinct forms, CJK form first.
+    pub fn distinct(&self) -> Vec<&str> {
+        if self.is_single() {
+            vec![self.zh.as_str()]
+        } else {
+            vec![self.zh.as_str(), self.words.as_str()]
+        }
+    }
+
+    /// Exact-phrase test against one stored normalized text.
+    pub fn matches(&self, stored: &str) -> bool {
+        if has_word_layout(stored) {
+            !self.words.trim().is_empty() && stored.contains(self.words.as_str())
+        } else {
+            !self.zh.is_empty() && stored.contains(self.zh.as_str())
+        }
+    }
+
+    /// The form that applies to one stored text (for locating occurrences).
+    pub fn form_for(&self, stored: &str) -> &str {
+        if has_word_layout(stored) {
+            &self.words
+        } else {
+            &self.zh
+        }
+    }
+
+    /// Character count used against the phrase-index gram size (spaces are
+    /// not indexed). The shorter form decides.
+    pub fn indexed_len(&self) -> usize {
+        let words = self.words.chars().filter(|c| *c != ' ').count();
+        let zh = self.zh.chars().count();
+        match (zh, words) {
+            (0, w) => w,
+            (z, 0) => z,
+            (z, w) => z.min(w),
+        }
+    }
+}
+
+/// File next to `passages.parquet/` recording which corpora were ingested
+/// with the word layout: `{"<corpus_id>": "words", ...}`. Absent for
+/// CJK-only data roots.
+pub const TEXT_PROFILES_FILE: &str = "text_profiles.json";
+
+/// Record (or clear) a corpus's text profile for the data root holding
+/// `passages_parquet`.
+pub fn record_text_profile(
+    passages_parquet: &std::path::Path,
+    corpus_id: &str,
+    words: bool,
+) -> std::io::Result<()> {
+    let Some(root) = passages_parquet.parent() else {
+        return Ok(());
+    };
+    let path = root.join(TEXT_PROFILES_FILE);
+    let mut map: std::collections::BTreeMap<String, String> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let changed = if words {
+        map.insert(corpus_id.to_string(), "words".to_string()).as_deref() != Some("words")
+    } else {
+        map.remove(corpus_id).is_some()
+    };
+    if !changed {
+        return Ok(());
+    }
+    if map.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&map).unwrap_or_default())
+}
+
+/// True when any corpus under this data root uses the word layout.
+pub fn data_root_has_word_corpus(passages_parquet: &std::path::Path) -> bool {
+    passages_parquet
+        .parent()
+        .map(|root| root.join(TEXT_PROFILES_FILE))
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&b).ok())
+        .is_some_and(|m| m.values().any(|v| v == "words"))
+}
+
 /// `true` iff every byte in `block` is ASCII non-whitespace, non-punctuation,
 /// non-symbol (the "keep" set under the existing `normalize_zh` policy).
 ///
@@ -247,6 +457,65 @@ mod tests {
         let c = normalize_zh("持缽入城");
         assert_eq!(a, b);
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn words_layout_lowercases_and_bounds_words() {
+        assert_eq!(normalize_words("The Coolant-Pump, replaced."), " the coolant pump replaced ");
+        assert_eq!(normalize_words("Hello, 世界 world"), " hello 世界 world ");
+        assert_eq!(normalize_words("卷3"), format!("{} 3 ", normalize_zh("卷")));
+    }
+
+    #[test]
+    fn words_layout_equals_zh_for_pure_cjk() {
+        for s in ["如是我聞", "如是， 我聞。", "持钵入城", "禅眾", "「一時佛在」舍衛國"] {
+            assert_eq!(normalize_words(s), normalize_zh(s), "{s}");
+            assert!(PhraseForms::new(s).is_single());
+        }
+    }
+
+    #[test]
+    fn zh_layout_never_has_spaces() {
+        for s in ["a b c", "Kumārajīva 譯", "T08n0235 金剛經", "x\u{3000}y"] {
+            assert!(!has_word_layout(&normalize_zh(s)), "{s}");
+        }
+    }
+
+    #[test]
+    fn phrase_forms_respect_word_boundaries() {
+        let stored = normalize_words("We concatenate strings; the cat sat.");
+        assert!(PhraseForms::new("cat").matches(&stored));
+        assert!(PhraseForms::new("The CAT sat").matches(&stored));
+        assert!(!PhraseForms::new("cate").matches(&stored));
+        assert!(!PhraseForms::new("cat sat on").matches(&stored));
+    }
+
+    #[test]
+    fn phrase_forms_on_cjk_layout_match_like_before() {
+        let stored = normalize_zh("如是我聞。一時佛在舍衛國，T08n0235");
+        for q in ["我聞", "一時佛在", "T08n0235", "佛在舍衛國T08"] {
+            assert_eq!(
+                PhraseForms::new(q).matches(&stored),
+                stored.contains(&normalize_zh(q)),
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn variant_forms_stay_in_their_layout() {
+        let cjk_stored = normalize_zh("Kumarajiva譯 kumarajiva");
+        let word_stored = normalize_words("Kumarajiva translated");
+        let zh_variant = PhraseForms::from_normalized_variant(&normalize_zh("Kumarajiva"));
+        let word_variant = PhraseForms::from_normalized_variant(&normalize_words("Kumarajiva"));
+        assert!(zh_variant.matches(&cjk_stored));
+        assert!(!zh_variant.matches(&word_stored));
+        assert!(word_variant.matches(&word_stored));
+        // The lowercased word form must never reach CJK-layout text.
+        assert!(!word_variant.matches(&normalize_zh("kumarajiva")));
+        let dense = PhraseForms::from_normalized_variant("如是我聞");
+        assert!(dense.matches(&normalize_words("如是我聞 thus")));
+        assert_eq!(word_variant.indexed_len(), 10);
     }
 
     #[test]

@@ -166,3 +166,112 @@ pub fn char_ngram_hashes_all_into(text: &str, min_n: usize, max_n: usize, out: &
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Word features for word-layout passages
+// ---------------------------------------------------------------------------
+//
+// CJK n-grams (above) are the only TF-IDF features of CJK-layout text, as
+// before. Passages stored with `normalize_words` (spaces around lowercased
+// words; see `crate::normalize`) additionally contribute word unigrams and
+// adjacent-word bigrams, so similarity works for English and other
+// alphabetic scripts. CJK-layout text never contains a space, so it never
+// produces a word feature.
+//
+// Feature hashes are taken over "\u{1}" + feature. CJK n-gram strings hold
+// only ideographs, so the two hash spaces cannot collide by construction.
+
+const WORD_FEATURE_PREFIX: &str = "\u{1}";
+
+/// Common English function words; dropped as unigrams and bigram parts.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "above", "after", "again", "against", "all", "also", "am", "an", "and", "any",
+    "are", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
+    "but", "by", "can", "could", "did", "do", "does", "doing", "down", "during", "each", "even",
+    "few", "for", "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers",
+    "herself", "him", "himself", "his", "how", "however", "i", "if", "in", "into", "is", "it",
+    "its", "itself", "just", "may", "me", "might", "more", "most", "much", "must", "my", "myself",
+    "no", "nor", "not", "now", "of", "off", "on", "once", "one", "only", "or", "other", "our",
+    "ours", "ourselves", "out", "over", "own", "same", "shall", "she", "should", "so", "some",
+    "such", "than", "that", "the", "their", "theirs", "them", "themselves", "then", "there",
+    "therefore", "these", "they", "this", "those", "through", "thus", "to", "too", "under",
+    "until", "up", "upon", "us", "very", "was", "we", "were", "what", "when", "where", "whether",
+    "which", "while", "who", "whom", "whose", "why", "will", "with", "within", "without", "would",
+    "yet", "you", "your", "yours", "yourself", "yourselves",
+];
+
+fn is_stopword(word: &str) -> bool {
+    STOPWORDS.binary_search(&word).is_ok()
+}
+
+fn keep_word(token: &str) -> bool {
+    if token.chars().any(crate::normalize::is_dense_char) {
+        return false;
+    }
+    let len = token.chars().count();
+    if token.chars().all(|c| c.is_ascii_digit()) {
+        return len >= 4; // years, part numbers
+    }
+    len >= 3 && !is_stopword(token)
+}
+
+/// Call `f(feature, hash)` for every word feature of a stored normalized
+/// text, with repeats (for term frequency). No-op for CJK-layout text.
+pub fn for_each_word_feature(normalized: &str, mut f: impl FnMut(&str, u64)) {
+    use xxhash_rust::xxh3::xxh3_64;
+    if !crate::normalize::has_word_layout(normalized) {
+        return;
+    }
+    let mut key = String::with_capacity(64);
+    let mut prev: Option<&str> = None;
+    for token in normalized.split(' ').filter(|t| !t.is_empty()) {
+        if !keep_word(token) {
+            prev = None;
+            continue;
+        }
+        key.clear();
+        key.push_str(WORD_FEATURE_PREFIX);
+        key.push_str(token);
+        f(token, xxh3_64(key.as_bytes()));
+        if let Some(p) = prev {
+            key.clear();
+            key.push_str(WORD_FEATURE_PREFIX);
+            key.push_str(p);
+            key.push(' ');
+            key.push_str(token);
+            f(&key[WORD_FEATURE_PREFIX.len()..], xxh3_64(key.as_bytes()));
+        }
+        prev = Some(token);
+    }
+}
+
+#[cfg(test)]
+mod word_feature_tests {
+    use super::*;
+
+    #[test]
+    fn stopwords_are_sorted_for_binary_search() {
+        let mut sorted = STOPWORDS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, STOPWORDS);
+    }
+
+    #[test]
+    fn word_features_unigrams_and_bigrams() {
+        let text = crate::normalize::normalize_words("The coolant pump on unit seven was replaced in 2002.");
+        let mut feats = Vec::new();
+        for_each_word_feature(&text, |s, _| feats.push(s.to_string()));
+        assert_eq!(
+            feats,
+            vec!["coolant", "pump", "coolant pump", "unit", "seven", "unit seven", "replaced", "2002"]
+        );
+    }
+
+    #[test]
+    fn cjk_layout_has_no_word_features() {
+        let text = crate::normalize::normalize_zh("如是我聞 Kumarajiva translated this");
+        let mut n = 0;
+        for_each_word_feature(&text, |_, _| n += 1);
+        assert_eq!(n, 0);
+    }
+}

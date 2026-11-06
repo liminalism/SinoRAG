@@ -165,17 +165,34 @@ fn write_opencode_config(
 fn write_agents_md(workdir: &std::path::Path) -> Result<()> {
     let path = workdir.join("AGENTS.md");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let new_contents = update_managed_block(&existing);
+    // English/alphabetic-script corpora (document intake) get a short extra
+    // section on how word-aware search behaves; CBETA installs do not.
+    let parquet = workdir.join("data").join("passages.parquet");
+    let body = if crate::normalize::data_root_has_word_corpus(&parquet) {
+        format!(
+            "{}\n\n{}",
+            AGENTS_MD_MANAGED_BODY.trim_end(),
+            crate::mcp::server::WORD_CORPUS_INSTRUCTIONS.trim_end()
+        )
+    } else {
+        AGENTS_MD_MANAGED_BODY.to_string()
+    };
+    let new_contents = update_managed_block_with(&existing, &body);
     std::fs::write(&path, new_contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
+#[cfg(test)]
 fn update_managed_block(existing: &str) -> String {
+    update_managed_block_with(existing, AGENTS_MD_MANAGED_BODY)
+}
+
+fn update_managed_block_with(existing: &str, body: &str) -> String {
     let managed = format!(
         "{}\n{}\n{}",
         SENTINEL_BEGIN,
-        AGENTS_MD_MANAGED_BODY.trim_end(),
+        body.trim_end(),
         SENTINEL_END,
     );
 

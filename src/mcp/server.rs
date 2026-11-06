@@ -30,10 +30,14 @@ use crate::tools::{call_tool_enveloped, tool_defs, EngineConfig, ToolAudience, T
 /// `AGENTS.md`; here we keep a compact version so the model has the lens
 /// guidance even when invoked from a non-opencode client.
 const SERVER_INSTRUCTIONS: &str = include_str!("../agent/doctrine/mcp_instructions.md");
+/// Appended only when the data root holds a word-layout corpus (English or
+/// another alphabetic script, e.g. from document intake).
+pub const WORD_CORPUS_INSTRUCTIONS: &str = include_str!("../agent/doctrine/word_corpus.md");
 
 pub struct SinoragMcpServer {
     engine: Arc<ToolEngine>,
     tools: Vec<Tool>,
+    instructions: String,
     /// Required by the `ServerHandler` blanket impls even though we never
     /// route through it (we override `list_tools`/`call_tool` directly).
     _router: ToolRouter<Self>,
@@ -61,9 +65,22 @@ impl SinoragMcpServer {
     }
 
     pub fn new(engine: Arc<ToolEngine>) -> Self {
+        let word_corpus = engine
+            .resolve_passages_path()
+            .is_ok_and(|p| crate::normalize::data_root_has_word_corpus(&p));
+        let instructions = if word_corpus {
+            format!(
+                "{}\n\n{}",
+                SERVER_INSTRUCTIONS.trim_end(),
+                WORD_CORPUS_INSTRUCTIONS.trim_end()
+            )
+        } else {
+            SERVER_INSTRUCTIONS.to_string()
+        };
         Self {
             engine,
             tools: Self::build_tools(),
+            instructions,
             _router: ToolRouter::new(),
         }
     }
@@ -152,7 +169,7 @@ impl ServerHandler for SinoragMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(SERVER_INSTRUCTIONS)
+            .with_instructions(self.instructions.clone())
     }
 
     async fn list_tools(
